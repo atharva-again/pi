@@ -127,7 +127,7 @@ The command output is sent to the model. Use `!!command` to run a command withou
 
 ### Switch models
 
-Use `/model` or Ctrl+L to choose a model. Use Shift+Tab to cycle thinking level. Use Ctrl+P / Shift+Ctrl+P to cycle through scoped models.
+Use `/model` or Ctrl+L to choose a model. Use Alt+, / Alt+. to decrease/increase thinking level. Use Ctrl+P / Shift+Ctrl+P to cycle through scoped models.
 
 ### Continue later
 
