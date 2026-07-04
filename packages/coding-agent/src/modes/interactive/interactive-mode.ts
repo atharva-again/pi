@@ -179,6 +179,47 @@ class ExpandableText extends Text implements Expandable {
 	}
 }
 
+function getWorkedForTimestamp(message: unknown): number | undefined {
+	const timestamp = (message as { timestamp?: unknown } | undefined)?.timestamp;
+	if (typeof timestamp === "number" && Number.isFinite(timestamp)) return timestamp;
+	if (typeof timestamp === "string") {
+		const parsed = Date.parse(timestamp);
+		if (Number.isFinite(parsed)) return parsed;
+	}
+	return undefined;
+}
+
+function formatWorkedForDuration(elapsedMs: number): string {
+	const totalSeconds = Math.max(0, Math.round(elapsedMs / 1000));
+	const seconds = totalSeconds % 60;
+	const totalMinutes = Math.floor(totalSeconds / 60);
+	const minutes = totalMinutes % 60;
+	const hours = Math.floor(totalMinutes / 60);
+
+	if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+	if (minutes > 0) return `${minutes}m ${seconds}s`;
+	return `${seconds}s`;
+}
+
+class WorkedForSeparator implements Component {
+	constructor(private readonly elapsedMs: number) {}
+
+	invalidate() {}
+
+	render(width: number): string[] {
+		const availableWidth = Math.max(0, width);
+		if (availableWidth === 0) return [];
+
+		const prefix = `─ Worked for ${formatWorkedForDuration(this.elapsedMs)} `;
+		const line =
+			prefix.length >= availableWidth
+				? prefix.slice(0, availableWidth)
+				: prefix + "─".repeat(availableWidth - prefix.length);
+
+		return [theme.fg("dim", line)];
+	}
+}
+
 type CompactionQueuedMessage = {
 	text: string;
 	mode: "steer" | "followUp";
@@ -315,6 +356,9 @@ export class InteractiveMode {
 	// Status line tracking (for mutating immediately-sequential status updates)
 	private lastStatusSpacer: Spacer | undefined = undefined;
 	private lastStatusText: Text | undefined = undefined;
+
+	// Inline worked-for divider timing for the current user request.
+	private workedForStartMs: number | undefined = undefined;
 
 	// Streaming message tracking
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
@@ -2760,6 +2804,9 @@ export class InteractiveMode {
 		switch (event.type) {
 			case "agent_start":
 				this.pendingTools.clear();
+				if (this.workedForStartMs === undefined) {
+					this.workedForStartMs = Date.now();
+				}
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
@@ -2811,6 +2858,7 @@ export class InteractiveMode {
 					this.addMessageToChat(event.message);
 					this.ui.requestRender();
 				} else if (event.message.role === "user") {
+					this.workedForStartMs = getWorkedForTimestamp(event.message) ?? Date.now();
 					this.addMessageToChat(event.message);
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
@@ -2957,6 +3005,10 @@ export class InteractiveMode {
 					this.streamingMessage = undefined;
 				}
 				this.pendingTools.clear();
+				if (this.workedForStartMs !== undefined) {
+					this.addWorkedForSeparator(Date.now() - this.workedForStartMs);
+					this.workedForStartMs = undefined;
+				}
 
 				await this.checkShutdownRequested();
 
@@ -3080,6 +3132,14 @@ export class InteractiveMode {
 		this.lastStatusSpacer = spacer;
 		this.lastStatusText = text;
 		this.ui.requestRender();
+	}
+
+	private addWorkedForSeparator(elapsedMs: number): void {
+		if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return;
+		if (this.chatContainer.children.length > 0) {
+			this.chatContainer.addChild(new Spacer(1));
+		}
+		this.chatContainer.addChild(new WorkedForSeparator(elapsedMs));
 	}
 
 	private addCustomEntryToChat(entry: Extract<SessionEntry, { type: "custom" }>): void {
@@ -3215,6 +3275,16 @@ export class InteractiveMode {
 			this.updateEditorBorderColor();
 		}
 
+		let replayTurnStartMs: number | undefined;
+		let replayTurnEndMs: number | undefined;
+		const flushReplayWorkedForSeparator = () => {
+			if (replayTurnStartMs !== undefined && replayTurnEndMs !== undefined) {
+				this.addWorkedForSeparator(replayTurnEndMs - replayTurnStartMs);
+			}
+			replayTurnStartMs = undefined;
+			replayTurnEndMs = undefined;
+		};
+
 		for (const item of items) {
 			if (isCustomSessionEntry(item)) {
 				this.addCustomEntryToChat(item);
@@ -3222,9 +3292,14 @@ export class InteractiveMode {
 			}
 
 			const message = item;
+			if (message.role === "user") {
+				flushReplayWorkedForSeparator();
+				replayTurnStartMs = getWorkedForTimestamp(message);
+			}
 			// Assistant messages need special handling for tool calls
 			if (message.role === "assistant") {
 				this.addMessageToChat(message);
+				replayTurnEndMs = getWorkedForTimestamp(message) ?? replayTurnEndMs;
 				// Render tool call components
 				for (const content of message.content) {
 					if (content.type === "toolCall") {
@@ -3272,6 +3347,8 @@ export class InteractiveMode {
 				this.addMessageToChat(message, options);
 			}
 		}
+
+		flushReplayWorkedForSeparator();
 
 		for (const [toolCallId, component] of renderedPendingTools) {
 			this.pendingTools.set(toolCallId, component);

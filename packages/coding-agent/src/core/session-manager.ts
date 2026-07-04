@@ -381,6 +381,8 @@ export function sessionEntryToContextMessages(entry: SessionEntry): AgentMessage
 		return [entry.message];
 	}
 	if (entry.type === "custom_message") {
+		// Legacy local worked-for extension entries are superseded by the native TUI divider.
+		if (entry.customType === "worked-for") return [];
 		return [createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp)];
 	}
 	if (entry.type === "branch_summary" && entry.summary) {
