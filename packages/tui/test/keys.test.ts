@@ -435,6 +435,10 @@ describe("matchesKey", () => {
 			assert.strictEqual(parseKey("\x1by"), "alt+y");
 			assert.strictEqual(matchesKey("\x1bz", "alt+z"), true);
 			assert.strictEqual(parseKey("\x1bz"), "alt+z");
+			assert.strictEqual(matchesKey("\x1b,", "alt+,"), true);
+			assert.strictEqual(parseKey("\x1b,"), "alt+,");
+			assert.strictEqual(matchesKey("\x1b.", "alt+."), true);
+			assert.strictEqual(parseKey("\x1b."), "alt+.");
 
 			setKittyProtocolActive(true);
 			assert.strictEqual(matchesKey("\x1b ", "alt+space"), false);
@@ -453,6 +457,10 @@ describe("matchesKey", () => {
 			assert.strictEqual(parseKey("\x1b1"), undefined);
 			assert.strictEqual(matchesKey("\x1by", "alt+y"), false);
 			assert.strictEqual(parseKey("\x1by"), undefined);
+			assert.strictEqual(matchesKey("\x1b,", "alt+,"), false);
+			assert.strictEqual(parseKey("\x1b,"), undefined);
+			assert.strictEqual(matchesKey("\x1b.", "alt+."), false);
+			assert.strictEqual(parseKey("\x1b."), undefined);
 			setKittyProtocolActive(false);
 		});
 
