@@ -179,15 +179,51 @@ class ExpandableText extends Text implements Expandable {
 	}
 }
 
+function formatWorkedForDuration(elapsedMs: number): string {
+	const totalSeconds = Math.max(0, Math.round(elapsedMs / 1000));
+	const seconds = totalSeconds % 60;
+	const totalMinutes = Math.floor(totalSeconds / 60);
+	const minutes = totalMinutes % 60;
+	const hours = Math.floor(totalMinutes / 60);
+
+	if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+	if (minutes > 0) return `${minutes}m ${seconds}s`;
+	return `${seconds}s`;
+}
+
+class WorkedForSeparator implements Component {
+	private readonly elapsedMs: number;
+
+	constructor(elapsedMs: number) {
+		this.elapsedMs = elapsedMs;
+	}
+
+	invalidate() {}
+
+	render(width: number): string[] {
+		const availableWidth = Math.max(0, width);
+		if (availableWidth === 0) return [];
+
+		const prefix = `─ Worked for ${formatWorkedForDuration(this.elapsedMs)} `;
+		const line =
+			prefix.length >= availableWidth
+				? prefix.slice(0, availableWidth)
+				: prefix + "─".repeat(availableWidth - prefix.length);
+
+		return [theme.fg("dim", line)];
+	}
+}
+
 type CompactionQueuedMessage = {
 	text: string;
 	mode: "steer" | "followUp";
 };
 
-type RenderSessionItem = AgentMessage | Extract<SessionEntry, { type: "custom" }>;
+type RenderSessionEntry = Extract<SessionEntry, { type: "custom" | "work_duration" }>;
+type RenderSessionItem = AgentMessage | RenderSessionEntry;
 
-function isCustomSessionEntry(item: RenderSessionItem): item is Extract<SessionEntry, { type: "custom" }> {
-	return "type" in item && item.type === "custom";
+function isRenderSessionEntry(item: RenderSessionItem): item is RenderSessionEntry {
+	return "type" in item;
 }
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
@@ -2792,6 +2828,9 @@ export class InteractiveMode {
 				if (event.entry.type === "custom") {
 					this.addCustomEntryToChat(event.entry);
 					this.ui.requestRender();
+				} else if (event.entry.type === "work_duration") {
+					this.addWorkDurationEntryToChat(event.entry);
+					this.ui.requestRender();
 				}
 				break;
 
@@ -3082,6 +3121,18 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
+	private addWorkedForSeparator(elapsedMs: number): void {
+		if (!Number.isFinite(elapsedMs) || elapsedMs < 0) return;
+		if (this.chatContainer.children.length > 0) {
+			this.chatContainer.addChild(new Spacer(1));
+		}
+		this.chatContainer.addChild(new WorkedForSeparator(elapsedMs));
+	}
+
+	private addWorkDurationEntryToChat(entry: Extract<SessionEntry, { type: "work_duration" }>): void {
+		this.addWorkedForSeparator(entry.durationMs);
+	}
+
 	private addCustomEntryToChat(entry: Extract<SessionEntry, { type: "custom" }>): void {
 		const renderer = this.session.extensionRunner.getEntryRenderer(entry.customType);
 		if (!renderer) {
@@ -3216,8 +3267,12 @@ export class InteractiveMode {
 		}
 
 		for (const item of items) {
-			if (isCustomSessionEntry(item)) {
-				this.addCustomEntryToChat(item);
+			if (isRenderSessionEntry(item)) {
+				if (item.type === "custom") {
+					this.addCustomEntryToChat(item);
+				} else {
+					this.addWorkDurationEntryToChat(item);
+				}
 				continue;
 			}
 
@@ -3290,7 +3345,7 @@ export class InteractiveMode {
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
 		const items = entries.flatMap((entry): RenderSessionItem[] => {
-			if (entry.type === "custom") {
+			if (entry.type === "custom" || entry.type === "work_duration") {
 				return [entry];
 			}
 			return sessionEntryToContextMessages(entry);

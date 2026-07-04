@@ -600,6 +600,23 @@
       font-weight: bold;
     }
 
+    .work-duration {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--dim);
+      font-size: 11px;
+      padding: 0 var(--line-height);
+    }
+
+    .work-duration::before,
+    .work-duration::after {
+      content: "";
+      flex: 1;
+      border-top: 1px solid var(--dim);
+      opacity: 0.5;
+    }
+
     /* Compaction / Branch Summary - matches customMessage colors from TUI */
     .compaction {
       background: var(--customMessageBg);

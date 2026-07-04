@@ -116,6 +116,14 @@ export interface SessionInfoEntry extends SessionEntryBase {
 	name?: string;
 }
 
+/** Display-only entry recording how long the agent worked before returning to idle or another user input. */
+export interface WorkDurationEntry extends SessionEntryBase {
+	type: "work_duration";
+	startedAt: string;
+	endedAt: string;
+	durationMs: number;
+}
+
 /**
  * Custom message entry for extensions to inject messages into LLM context.
  * Use customType to identify your extension's entries.
@@ -146,7 +154,8 @@ export type SessionEntry =
 	| CustomEntry
 	| CustomMessageEntry
 	| LabelEntry
-	| SessionInfoEntry;
+	| SessionInfoEntry
+	| WorkDurationEntry;
 
 /** Raw file entry (includes header) */
 export type FileEntry = SessionHeader | SessionEntry;
@@ -1058,6 +1067,22 @@ export class SessionManager {
 			parentId: this.leafId,
 			timestamp: new Date().toISOString(),
 			name: sanitizedName,
+		};
+		this._appendEntry(entry);
+		return entry.id;
+	}
+
+	/** Append a display-only agent work duration entry. Returns entry id. */
+	appendWorkDuration(startedAtMs: number, endedAtMs: number): string {
+		const durationMs = Math.max(0, Math.round(endedAtMs - startedAtMs));
+		const entry: WorkDurationEntry = {
+			type: "work_duration",
+			id: generateId(this.byId),
+			parentId: this.leafId,
+			timestamp: new Date(endedAtMs).toISOString(),
+			startedAt: new Date(startedAtMs).toISOString(),
+			endedAt: new Date(endedAtMs).toISOString(),
+			durationMs,
 		};
 		this._appendEntry(entry);
 		return entry.id;

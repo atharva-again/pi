@@ -331,6 +331,7 @@ function findValidCutPoints(entries: SessionEntry[], startIndex: number, endInde
 			case "custom_message":
 			case "label":
 			case "session_info":
+			case "work_duration":
 				break;
 		}
 
