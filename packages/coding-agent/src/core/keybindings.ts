@@ -15,7 +15,8 @@ export interface AppKeybindings {
 	"app.clear": true;
 	"app.exit": true;
 	"app.suspend": true;
-	"app.thinking.cycle": true;
+	"app.thinking.cycleForward": true;
+	"app.thinking.cycleBackward": true;
 	"app.model.cycleForward": true;
 	"app.model.cycleBackward": true;
 	"app.model.select": true;
@@ -69,9 +70,13 @@ export const KEYBINDINGS = {
 		defaultKeys: process.platform === "win32" ? [] : "ctrl+z",
 		description: "Suspend to background",
 	},
-	"app.thinking.cycle": {
-		defaultKeys: "shift+tab",
-		description: "Cycle thinking level",
+	"app.thinking.cycleForward": {
+		defaultKeys: "alt+.",
+		description: "Increase thinking level",
+	},
+	"app.thinking.cycleBackward": {
+		defaultKeys: "alt+,",
+		description: "Decrease thinking level",
 	},
 	"app.model.cycleForward": {
 		defaultKeys: "ctrl+p",
@@ -237,7 +242,8 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	clear: "app.clear",
 	exit: "app.exit",
 	suspend: "app.suspend",
-	cycleThinkingLevel: "app.thinking.cycle",
+	cycleThinkingLevelForward: "app.thinking.cycleForward",
+	cycleThinkingLevelBackward: "app.thinking.cycleBackward",
 	cycleModelForward: "app.model.cycleForward",
 	cycleModelBackward: "app.model.cycleBackward",
 	selectModel: "app.model.select",
