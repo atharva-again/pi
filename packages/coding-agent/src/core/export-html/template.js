@@ -329,6 +329,18 @@
         };
       }
 
+      function formatWorkDuration(durationMs) {
+        const totalSeconds = Math.max(0, Math.round(durationMs / 1000));
+        const seconds = totalSeconds % 60;
+        const totalMinutes = Math.floor(totalSeconds / 60);
+        const minutes = totalMinutes % 60;
+        const hours = Math.floor(totalMinutes / 60);
+
+        if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+        if (minutes > 0) return `${minutes}m ${seconds}s`;
+        return `${seconds}s`;
+      }
+
       function getSearchableText(entry, label) {
         const parts = [];
         if (label) parts.push(label);
@@ -350,6 +362,9 @@
             break;
           case 'branch_summary':
             parts.push('branch summary', entry.summary);
+            break;
+          case 'work_duration':
+            parts.push('worked for', formatWorkDuration(entry.durationMs));
             break;
           case 'model_change':
             parts.push('model', entry.modelId);
@@ -385,7 +400,7 @@
           }
 
           // Apply filter mode
-          const isSettingsEntry = ['label', 'custom', 'model_change', 'thinking_level_change'].includes(entry.type);
+          const isSettingsEntry = ['label', 'custom', 'model_change', 'thinking_level_change', 'work_duration'].includes(entry.type);
           let passesFilter = true;
 
           switch (filterMode) {
@@ -692,6 +707,8 @@
             const content = typeof entry.content === 'string' ? entry.content : extractContent(entry.content);
             return labelHtml + `<span class="tree-custom">[${escapeHtml(entry.customType)}]:</span> ${escapeHtml(truncate(normalize(content)))}`;
           }
+          case 'work_duration':
+            return labelHtml + `<span class="tree-muted">[worked for: ${escapeHtml(formatWorkDuration(entry.durationMs))}]</span>`;
           case 'model_change':
             return labelHtml + `<span class="tree-muted">[model: ${escapeHtml(entry.modelId)}]</span>`;
           case 'thinking_level_change':
@@ -1311,6 +1328,10 @@
             <div class="hook-type">[${escapeHtml(entry.customType)}]</div>
             <div class="markdown-content">${safeMarkedParse(typeof entry.content === 'string' ? entry.content : JSON.stringify(entry.content))}</div>
           </div>`;
+        }
+
+        if (entry.type === 'work_duration') {
+          return `<div class="work-duration" id="${entryDomId}"><span>Worked for ${escapeHtml(formatWorkDuration(entry.durationMs))}</span></div>`;
         }
 
         return '';

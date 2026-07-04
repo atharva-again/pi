@@ -52,6 +52,18 @@ const MAX_VISIBLE_ANCHOR_CONTENT_WIDTH = 20;
 const MIN_ANCHOR_CONTEXT_WIDTH = 2;
 const MAX_ANCHOR_CONTEXT_WIDTH = 12;
 
+function formatWorkDuration(durationMs: number): string {
+	const totalSeconds = Math.max(0, Math.round(durationMs / 1000));
+	const seconds = totalSeconds % 60;
+	const totalMinutes = Math.floor(totalSeconds / 60);
+	const minutes = totalMinutes % 60;
+	const hours = Math.floor(totalMinutes / 60);
+
+	if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`;
+	if (minutes > 0) return `${minutes}m ${seconds}s`;
+	return `${seconds}s`;
+}
+
 /**
  * Render tree rows into a horizontally clipped viewport.
  *
@@ -359,7 +371,8 @@ class TreeList implements Component {
 				entry.type === "custom" ||
 				entry.type === "model_change" ||
 				entry.type === "thinking_level_change" ||
-				entry.type === "session_info";
+				entry.type === "session_info" ||
+				entry.type === "work_duration";
 
 			switch (this.filterMode) {
 				case "user-only":
@@ -595,6 +608,9 @@ class TreeList implements Component {
 			case "session_info":
 				parts.push("title");
 				if (entry.name) parts.push(entry.name);
+				break;
+			case "work_duration":
+				parts.push("worked for", formatWorkDuration(entry.durationMs));
 				break;
 			case "model_change":
 				parts.push("model", entry.modelId);
@@ -837,6 +853,9 @@ class TreeList implements Component {
 				result = entry.name
 					? [theme.fg("dim", "[title: "), theme.fg("dim", entry.name), theme.fg("dim", "]")].join("")
 					: [theme.fg("dim", "[title: "), theme.italic(theme.fg("dim", "empty")), theme.fg("dim", "]")].join("");
+				break;
+			case "work_duration":
+				result = theme.fg("dim", `[worked for: ${formatWorkDuration(entry.durationMs)}]`);
 				break;
 			default:
 				result = "";

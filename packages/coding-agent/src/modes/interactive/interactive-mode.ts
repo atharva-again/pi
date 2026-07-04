@@ -179,16 +179,6 @@ class ExpandableText extends Text implements Expandable {
 	}
 }
 
-function getWorkedForTimestamp(message: unknown): number | undefined {
-	const timestamp = (message as { timestamp?: unknown } | undefined)?.timestamp;
-	if (typeof timestamp === "number" && Number.isFinite(timestamp)) return timestamp;
-	if (typeof timestamp === "string") {
-		const parsed = Date.parse(timestamp);
-		if (Number.isFinite(parsed)) return parsed;
-	}
-	return undefined;
-}
-
 function formatWorkedForDuration(elapsedMs: number): string {
 	const totalSeconds = Math.max(0, Math.round(elapsedMs / 1000));
 	const seconds = totalSeconds % 60;
@@ -202,7 +192,11 @@ function formatWorkedForDuration(elapsedMs: number): string {
 }
 
 class WorkedForSeparator implements Component {
-	constructor(private readonly elapsedMs: number) {}
+	private readonly elapsedMs: number;
+
+	constructor(elapsedMs: number) {
+		this.elapsedMs = elapsedMs;
+	}
 
 	invalidate() {}
 
@@ -225,10 +219,11 @@ type CompactionQueuedMessage = {
 	mode: "steer" | "followUp";
 };
 
-type RenderSessionItem = AgentMessage | Extract<SessionEntry, { type: "custom" }>;
+type RenderSessionEntry = Extract<SessionEntry, { type: "custom" | "work_duration" }>;
+type RenderSessionItem = AgentMessage | RenderSessionEntry;
 
-function isCustomSessionEntry(item: RenderSessionItem): item is Extract<SessionEntry, { type: "custom" }> {
-	return "type" in item && item.type === "custom";
+function isRenderSessionEntry(item: RenderSessionItem): item is RenderSessionEntry {
+	return "type" in item;
 }
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
@@ -356,9 +351,6 @@ export class InteractiveMode {
 	// Status line tracking (for mutating immediately-sequential status updates)
 	private lastStatusSpacer: Spacer | undefined = undefined;
 	private lastStatusText: Text | undefined = undefined;
-
-	// Inline worked-for divider timing for the current user request.
-	private workedForStartMs: number | undefined = undefined;
 
 	// Streaming message tracking
 	private streamingComponent: AssistantMessageComponent | undefined = undefined;
@@ -2804,9 +2796,6 @@ export class InteractiveMode {
 		switch (event.type) {
 			case "agent_start":
 				this.pendingTools.clear();
-				if (this.workedForStartMs === undefined) {
-					this.workedForStartMs = Date.now();
-				}
 				if (this.settingsManager.getShowTerminalProgress()) {
 					this.ui.terminal.setProgress(true);
 				}
@@ -2839,6 +2828,9 @@ export class InteractiveMode {
 				if (event.entry.type === "custom") {
 					this.addCustomEntryToChat(event.entry);
 					this.ui.requestRender();
+				} else if (event.entry.type === "work_duration") {
+					this.addWorkDurationEntryToChat(event.entry);
+					this.ui.requestRender();
 				}
 				break;
 
@@ -2858,7 +2850,6 @@ export class InteractiveMode {
 					this.addMessageToChat(event.message);
 					this.ui.requestRender();
 				} else if (event.message.role === "user") {
-					this.workedForStartMs = getWorkedForTimestamp(event.message) ?? Date.now();
 					this.addMessageToChat(event.message);
 					this.updatePendingMessagesDisplay();
 					this.ui.requestRender();
@@ -3005,10 +2996,6 @@ export class InteractiveMode {
 					this.streamingMessage = undefined;
 				}
 				this.pendingTools.clear();
-				if (this.workedForStartMs !== undefined) {
-					this.addWorkedForSeparator(Date.now() - this.workedForStartMs);
-					this.workedForStartMs = undefined;
-				}
 
 				await this.checkShutdownRequested();
 
@@ -3140,6 +3127,10 @@ export class InteractiveMode {
 			this.chatContainer.addChild(new Spacer(1));
 		}
 		this.chatContainer.addChild(new WorkedForSeparator(elapsedMs));
+	}
+
+	private addWorkDurationEntryToChat(entry: Extract<SessionEntry, { type: "work_duration" }>): void {
+		this.addWorkedForSeparator(entry.durationMs);
 	}
 
 	private addCustomEntryToChat(entry: Extract<SessionEntry, { type: "custom" }>): void {
@@ -3275,31 +3266,20 @@ export class InteractiveMode {
 			this.updateEditorBorderColor();
 		}
 
-		let replayTurnStartMs: number | undefined;
-		let replayTurnEndMs: number | undefined;
-		const flushReplayWorkedForSeparator = () => {
-			if (replayTurnStartMs !== undefined && replayTurnEndMs !== undefined) {
-				this.addWorkedForSeparator(replayTurnEndMs - replayTurnStartMs);
-			}
-			replayTurnStartMs = undefined;
-			replayTurnEndMs = undefined;
-		};
-
 		for (const item of items) {
-			if (isCustomSessionEntry(item)) {
-				this.addCustomEntryToChat(item);
+			if (isRenderSessionEntry(item)) {
+				if (item.type === "custom") {
+					this.addCustomEntryToChat(item);
+				} else {
+					this.addWorkDurationEntryToChat(item);
+				}
 				continue;
 			}
 
 			const message = item;
-			if (message.role === "user") {
-				flushReplayWorkedForSeparator();
-				replayTurnStartMs = getWorkedForTimestamp(message);
-			}
 			// Assistant messages need special handling for tool calls
 			if (message.role === "assistant") {
 				this.addMessageToChat(message);
-				replayTurnEndMs = getWorkedForTimestamp(message) ?? replayTurnEndMs;
 				// Render tool call components
 				for (const content of message.content) {
 					if (content.type === "toolCall") {
@@ -3348,8 +3328,6 @@ export class InteractiveMode {
 			}
 		}
 
-		flushReplayWorkedForSeparator();
-
 		for (const [toolCallId, component] of renderedPendingTools) {
 			this.pendingTools.set(toolCallId, component);
 		}
@@ -3367,7 +3345,7 @@ export class InteractiveMode {
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
 		const items = entries.flatMap((entry): RenderSessionItem[] => {
-			if (entry.type === "custom") {
+			if (entry.type === "custom" || entry.type === "work_duration") {
 				return [entry];
 			}
 			return sessionEntryToContextMessages(entry);

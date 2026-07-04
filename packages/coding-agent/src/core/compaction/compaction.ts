@@ -81,7 +81,6 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 		return entry.message;
 	}
 	if (entry.type === "custom_message") {
-		if (entry.customType === "worked-for") return undefined;
 		return createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp);
 	}
 	if (entry.type === "branch_summary") {
@@ -332,6 +331,7 @@ function findValidCutPoints(entries: SessionEntry[], startIndex: number, endInde
 			case "custom_message":
 			case "label":
 			case "session_info":
+			case "work_duration":
 				break;
 		}
 

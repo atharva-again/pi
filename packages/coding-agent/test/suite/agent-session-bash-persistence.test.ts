@@ -165,6 +165,7 @@ describe("AgentSession bash and persistence characterization", () => {
 			"message",
 			"message",
 			"message",
+			"work_duration",
 		]);
 		expect(harness.session.messages.map((message) => message.role)).toEqual([
 			"custom",
@@ -214,12 +215,19 @@ describe("AgentSession bash and persistence characterization", () => {
 		await harness.session.abort();
 		await promptPromise;
 
-		const lastEntry = harness.sessionManager.getEntries()[harness.sessionManager.getEntries().length - 1];
-		expect(lastEntry?.type).toBe("message");
-		if (lastEntry?.type === "message") {
-			expect(lastEntry.message.role).toBe("assistant");
-			if (lastEntry.message.role === "assistant") {
-				expect(lastEntry.message.stopReason).toBe("aborted");
+		const entries = harness.sessionManager.getEntries();
+		let lastMessageEntry: (typeof entries)[number] | undefined;
+		for (let i = entries.length - 1; i >= 0; i--) {
+			if (entries[i].type === "message") {
+				lastMessageEntry = entries[i];
+				break;
+			}
+		}
+		expect(lastMessageEntry?.type).toBe("message");
+		if (lastMessageEntry?.type === "message") {
+			expect(lastMessageEntry.message.role).toBe("assistant");
+			if (lastMessageEntry.message.role === "assistant") {
+				expect(lastMessageEntry.message.stopReason).toBe("aborted");
 			}
 		}
 	});

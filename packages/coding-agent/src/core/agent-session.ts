@@ -295,6 +295,12 @@ export class AgentSession {
 	private _retryAbortController: AbortController | undefined = undefined;
 	private _retryAttempt = 0;
 
+	// Agent work duration tracking for display-only session entries.
+	private _workDurationStartMs: number | undefined = undefined;
+	private _workDurationStartSource: "agent" | "user" | undefined = undefined;
+	private _workDurationEndMs: number | undefined = undefined;
+	private _workDurationHasWork = false;
+
 	// Bash execution state
 	private _bashAbortController: AbortController | undefined = undefined;
 	private _pendingBashMessages: BashExecutionMessage[] = [];
@@ -511,8 +517,53 @@ export class AgentSession {
 	// Track last assistant message for auto-compaction check
 	private _lastAssistantMessage: AssistantMessage | undefined = undefined;
 
+	private _startWorkDuration(startMs: number, source: "agent" | "user"): void {
+		this._workDurationStartMs = startMs;
+		this._workDurationStartSource = source;
+		this._workDurationEndMs = undefined;
+		this._workDurationHasWork = false;
+	}
+
+	private _markWorkDurationEnd(endMs: number): void {
+		if (this._workDurationStartMs === undefined) return;
+		this._workDurationEndMs = endMs;
+		this._workDurationHasWork = true;
+	}
+
+	private _resetWorkDuration(): void {
+		this._workDurationStartMs = undefined;
+		this._workDurationStartSource = undefined;
+		this._workDurationEndMs = undefined;
+		this._workDurationHasWork = false;
+	}
+
+	private _flushWorkDuration(fallbackEndMs: number): boolean {
+		const startedAtMs = this._workDurationStartMs;
+		if (startedAtMs === undefined || !this._workDurationHasWork) {
+			return false;
+		}
+
+		const endedAtMs = this._workDurationEndMs ?? fallbackEndMs;
+		if (!Number.isFinite(startedAtMs) || !Number.isFinite(endedAtMs) || endedAtMs < startedAtMs) {
+			this._resetWorkDuration();
+			return false;
+		}
+
+		const entryId = this.sessionManager.appendWorkDuration(startedAtMs, endedAtMs);
+		const entry = this.sessionManager.getEntry(entryId);
+		if (entry) {
+			this._emit({ type: "entry_appended", entry });
+		}
+		this._resetWorkDuration();
+		return true;
+	}
+
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	private _handleAgentEvent = async (event: AgentEvent): Promise<void> => {
+		if (event.type === "agent_start" && this._workDurationStartMs === undefined) {
+			this._startWorkDuration(Date.now(), "agent");
+		}
+
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
 		// This ensures the UI sees the updated queue state
 		if (event.type === "message_start" && event.message.role === "user") {
@@ -533,6 +584,22 @@ export class AgentSession {
 					}
 				}
 			}
+
+			const now = Date.now();
+			this._flushWorkDuration(now);
+			if (this._workDurationStartMs === undefined || this._workDurationStartSource === "agent") {
+				this._startWorkDuration(now, "user");
+			}
+		}
+
+		if (event.type === "message_end" && event.message.role === "assistant") {
+			this._markWorkDurationEnd(Date.now());
+		}
+		if (event.type === "turn_end") {
+			this._markWorkDurationEnd(Date.now());
+		}
+		if (event.type === "agent_end" && !this._flushWorkDuration(Date.now())) {
+			this._resetWorkDuration();
 		}
 
 		// Emit to extensions first
