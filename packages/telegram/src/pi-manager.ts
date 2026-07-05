@@ -9,7 +9,7 @@ import type {
 	RpcSessionState,
 } from "@earendil-works/pi-coding-agent";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
-import { createRpcProcessInstance, type RpcProcessInstance } from "@earendil-works/pi-orchestrator/rpc-process";
+import { createRpcProcessInstance, type RpcProcessInstance } from "./rpc-process.ts";
 import type { ConversationBinding } from "./store.ts";
 import { conversationKey, type TelegramBindingStore } from "./store.ts";
 

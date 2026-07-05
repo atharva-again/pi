@@ -38,8 +38,7 @@
 	},
 	"dependencies": {
 		"@earendil-works/pi-agent-core": "^0.80.3",
-		"@earendil-works/pi-coding-agent": "^0.80.3",
-		"@earendil-works/pi-orchestrator": "^0.80.3"
+		"@earendil-works/pi-coding-agent": "^0.80.3"
 	},
 	"devDependencies": {
 		"shx": "0.4.0",
