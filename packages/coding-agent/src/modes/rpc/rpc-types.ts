@@ -10,6 +10,7 @@ import type { ImageContent, Model } from "@earendil-works/pi-ai";
 import type { SessionStats } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
+import type { ModelScopeDiagnostic } from "../../core/model-resolver.ts";
 import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 
@@ -32,6 +33,8 @@ export type RpcCommand =
 	| { id?: string; type: "set_model"; provider: string; modelId: string }
 	| { id?: string; type: "cycle_model" }
 	| { id?: string; type: "get_available_models" }
+	| { id?: string; type: "get_scoped_models" }
+	| { id?: string; type: "set_scoped_models"; patterns: string[] }
 
 	// Thinking
 	| { id?: string; type: "set_thinking_level"; level: ThinkingLevel }
@@ -56,12 +59,15 @@ export type RpcCommand =
 	// Session
 	| { id?: string; type: "get_session_stats" }
 	| { id?: string; type: "export_html"; outputPath?: string }
+	| { id?: string; type: "export_jsonl"; outputPath?: string }
+	| { id?: string; type: "import_jsonl"; inputPath: string; cwdOverride?: string }
 	| { id?: string; type: "switch_session"; sessionPath: string }
 	| { id?: string; type: "fork"; entryId: string }
 	| { id?: string; type: "clone" }
 	| { id?: string; type: "get_fork_messages" }
 	| { id?: string; type: "get_entries"; since?: string }
 	| { id?: string; type: "get_tree" }
+	| { id?: string; type: "navigate_tree"; entryId: string; summarize?: boolean }
 	| { id?: string; type: "get_last_assistant_text" }
 	| { id?: string; type: "set_session_name"; name: string }
 
@@ -69,7 +75,8 @@ export type RpcCommand =
 	| { id?: string; type: "get_messages" }
 
 	// Commands (available for invocation via prompt)
-	| { id?: string; type: "get_commands" };
+	| { id?: string; type: "get_commands" }
+	| { id?: string; type: "reload" };
 
 // ============================================================================
 // RPC Slash Command (for get_commands response)
@@ -144,6 +151,23 @@ export type RpcResponse =
 			success: true;
 			data: { models: Model<any>[] };
 	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "get_scoped_models";
+			success: true;
+			data: { scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }> };
+	  }
+	| {
+			id?: string;
+			type: "response";
+			command: "set_scoped_models";
+			success: true;
+			data: {
+				scopedModels: Array<{ model: Model<any>; thinkingLevel?: ThinkingLevel }>;
+				diagnostics: ModelScopeDiagnostic[];
+			};
+	  }
 
 	// Thinking
 	| { id?: string; type: "response"; command: "set_thinking_level"; success: true }
@@ -174,6 +198,8 @@ export type RpcResponse =
 	// Session
 	| { id?: string; type: "response"; command: "get_session_stats"; success: true; data: SessionStats }
 	| { id?: string; type: "response"; command: "export_html"; success: true; data: { path: string } }
+	| { id?: string; type: "response"; command: "export_jsonl"; success: true; data: { path: string } }
+	| { id?: string; type: "response"; command: "import_jsonl"; success: true; data: { cancelled: boolean } }
 	| { id?: string; type: "response"; command: "switch_session"; success: true; data: { cancelled: boolean } }
 	| { id?: string; type: "response"; command: "fork"; success: true; data: { text: string; cancelled: boolean } }
 	| { id?: string; type: "response"; command: "clone"; success: true; data: { cancelled: boolean } }
@@ -201,6 +227,13 @@ export type RpcResponse =
 	| {
 			id?: string;
 			type: "response";
+			command: "navigate_tree";
+			success: true;
+			data: { cancelled: boolean; editorText?: string };
+	  }
+	| {
+			id?: string;
+			type: "response";
 			command: "get_last_assistant_text";
 			success: true;
 			data: { text: string | null };
@@ -218,6 +251,9 @@ export type RpcResponse =
 			success: true;
 			data: { commands: RpcSlashCommand[] };
 	  }
+
+	// Reload
+	| { id?: string; type: "response"; command: "reload"; success: true }
 
 	// Error response (any command can fail)
 	| { id?: string; type: "response"; command: string; success: false; error: string };
