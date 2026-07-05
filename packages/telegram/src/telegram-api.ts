@@ -67,7 +67,11 @@ export interface BotCommand {
 
 export type ChatAction = "typing" | "upload_document" | "upload_photo" | "record_voice";
 
-export type BotCommandScope = { type: "default" } | { type: "all_private_chats" } | { type: "all_group_chats" };
+export type BotCommandScope =
+	| { type: "default" }
+	| { type: "all_private_chats" }
+	| { type: "all_group_chats" }
+	| { type: "chat"; chat_id: string | number };
 
 interface InputRichMessage {
 	markdown: string;
@@ -150,6 +154,13 @@ function normalizeThreadId(threadId: string | undefined): number | undefined {
 	return Number.isSafeInteger(asNumber) ? asNumber : undefined;
 }
 
+function normalizeCommandScope(scope: BotCommandScope | undefined): BotCommandScope | undefined {
+	if (scope?.type !== "chat") {
+		return scope;
+	}
+	return { type: "chat", chat_id: normalizeChatId(String(scope.chat_id)) };
+}
+
 export class TelegramApiError extends Error {
 	readonly method: string;
 	readonly code?: number;
@@ -211,7 +222,7 @@ export class TelegramApi {
 	}
 
 	async setMyCommands(commands: BotCommand[], scope?: BotCommandScope): Promise<boolean> {
-		return this.request<boolean>("setMyCommands", { commands, scope });
+		return this.request<boolean>("setMyCommands", { commands, scope: normalizeCommandScope(scope) });
 	}
 
 	async sendChatAction(options: { chatId: string; threadId?: string; action: ChatAction }): Promise<boolean> {
