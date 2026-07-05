@@ -1,0 +1,48 @@
+{
+	"name": "pi-telegram",
+	"version": "0.80.3",
+	"description": "Telegram client for pi",
+	"type": "module",
+	"bin": {
+		"pi-telegram": "dist/cli.js"
+	},
+	"main": "./dist/index.js",
+	"types": "./dist/index.d.ts",
+	"exports": {
+		".": {
+			"types": "./dist/index.d.ts",
+			"import": "./dist/index.js"
+		}
+	},
+	"files": [
+		"dist",
+		"README.md",
+		"CHANGELOG.md"
+	],
+	"scripts": {
+		"clean": "shx rm -rf dist",
+		"build": "tsgo -p tsconfig.build.json && shx chmod +x dist/cli.js",
+		"test": "vitest --run",
+		"prepublishOnly": "npm run clean && npm run build"
+	},
+	"keywords": [
+		"pi",
+		"telegram",
+		"bot",
+		"agent"
+	],
+	"author": "Pi contributors",
+	"license": "MIT",
+	"engines": {
+		"node": ">=22.19.0"
+	},
+	"dependencies": {
+		"@earendil-works/pi-agent-core": "^0.80.3",
+		"@earendil-works/pi-coding-agent": "^0.80.3",
+		"@earendil-works/pi-orchestrator": "^0.80.3"
+	},
+	"devDependencies": {
+		"shx": "0.4.0",
+		"vitest": "4.1.9"
+	}
+}
