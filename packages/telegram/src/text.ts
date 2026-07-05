@@ -31,6 +31,50 @@ export function truncateTelegramButtonText(text: string, limit: number): string 
 	return `${text.slice(0, Math.max(0, limit - 1))}…`;
 }
 
+const MARKDOWN_V2_SPECIAL_CHARS = new Set("_[]()~`>#+-=|{}.!");
+
+function escapeTelegramMarkdownV2Text(text: string): string {
+	let escaped = "";
+	for (const char of text) {
+		if (char === "\\" || char === "*" || MARKDOWN_V2_SPECIAL_CHARS.has(char)) {
+			escaped += `\\${char}`;
+		} else {
+			escaped += char;
+		}
+	}
+	return escaped;
+}
+
+function escapeTelegramMarkdownV2Code(text: string): string {
+	return text.replace(/[\\`]/g, "\\$&");
+}
+
+export function formatTelegramMarkdown(text: string): string {
+	let output = "";
+	let index = 0;
+	while (index < text.length) {
+		if (text.startsWith("**", index)) {
+			const end = text.indexOf("**", index + 2);
+			if (end !== -1) {
+				output += `*${escapeTelegramMarkdownV2Text(text.slice(index + 2, end))}*`;
+				index = end + 2;
+				continue;
+			}
+		}
+		if (text[index] === "`") {
+			const end = text.indexOf("`", index + 1);
+			if (end !== -1) {
+				output += `\`${escapeTelegramMarkdownV2Code(text.slice(index + 1, end))}\``;
+				index = end + 1;
+				continue;
+			}
+		}
+		output += escapeTelegramMarkdownV2Text(text[index] ?? "");
+		index++;
+	}
+	return output;
+}
+
 export function splitTelegramText(text: string): string[] {
 	if (text.length <= TELEGRAM_MESSAGE_LIMIT) {
 		return [text];

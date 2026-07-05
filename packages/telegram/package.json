@@ -1,10 +1,10 @@
 {
-	"name": "pi-telegram",
-	"version": "0.80.3",
+	"name": "pi-tg",
+	"version": "0.1.0",
 	"description": "Telegram client for pi",
 	"type": "module",
 	"bin": {
-		"pi-telegram": "dist/cli.js"
+		"pi-tg": "dist/cli.js"
 	},
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
@@ -38,8 +38,7 @@
 	},
 	"dependencies": {
 		"@earendil-works/pi-agent-core": "^0.80.3",
-		"@earendil-works/pi-coding-agent": "^0.80.3",
-		"@earendil-works/pi-orchestrator": "^0.80.3"
+		"@earendil-works/pi-coding-agent": "^0.80.3"
 	},
 	"devDependencies": {
 		"shx": "0.4.0",

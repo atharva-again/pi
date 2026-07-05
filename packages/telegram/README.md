@@ -1,31 +1,49 @@
 # pi Telegram
 
-Experimental Telegram client for pi.
+Experimental Telegram client for pi, published as `pi-tg`.
 
 ## Quick start
 
-1. Create a Telegram bot with [@BotFather](https://t.me/BotFather).
-2. Find your Telegram numeric user ID with [@userinfobot](https://t.me/userinfobot).
-3. Start the bot from any directory where pi can run:
+1. Install the package:
+
+```bash
+npm install -g pi-tg
+```
+
+2. Create a Telegram bot with [@BotFather](https://t.me/BotFather).
+3. Find your Telegram numeric user ID with [@userinfobot](https://t.me/userinfobot).
+4. Run setup:
+
+```bash
+pi-tg setup
+pi-tg doctor
+pi-tg
+```
+
+Setup writes `~/.pi/agent/telegram/config.json` with `0600` permissions. Flags and
+`PI_TELEGRAM_*` environment variables still work and override the saved config.
+
+The bot uses the same pi provider configuration and credentials as the CLI.
+Authorized Telegram users inherit the filesystem and shell permissions of the
+user running `pi-tg`.
+
+## Non-interactive start
 
 ```bash
 PI_TELEGRAM_BOT_TOKEN=123:abc \
 PI_TELEGRAM_ALLOWED_USERS=123456789 \
-pi-telegram
+pi-tg
 ```
-
-The bot uses the same pi provider configuration and credentials as the CLI.
-Authorized Telegram users inherit the filesystem and shell permissions of the
-user running `pi-telegram`.
 
 ## Telegram UX
 
 - A normal DM is one pi session by default.
 - Telegram registers Pi's 22 built-in slash commands plus Telegram-native `/start` and `/help`.
+- Workspace extension, prompt, and skill commands are added to the per-chat slash menu when a Pi runtime is available.
 - `/scoped_models` is the Telegram-safe alias for Pi's `/scoped-models` command.
 - Menu-like commands use inline buttons, confirmations, document upload/download, and per-chat pending prompts.
 - Workspace changes are available from `/settings` and `/session` buttons without adding an extra slash command.
-- Normal messages are sent to pi with full tool access as the user running `pi-telegram`.
+- Normal messages are sent to pi with full tool access as the user running `pi-tg`.
 
 ## Commands
 
@@ -57,4 +75,4 @@ Pi commands:
 - `/compact` - compact now or prompt for custom instructions
 - `/resume` - recent-session picker or `/resume <id-or-path>`
 - `/reload` - reload keybindings, extensions, skills, prompts, and themes
-- `/quit` - private-chat confirmation to stop `pi-telegram`
+- `/quit` - private-chat confirmation to stop `pi-tg`

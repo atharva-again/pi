@@ -33,14 +33,13 @@ import {
 import {
 	extractMessageText,
 	formatError,
+	formatTelegramMarkdown,
 	splitTelegramText,
 	truncateTelegramButtonText,
 	truncateTelegramText,
 } from "./text.ts";
 
 interface StreamingState {
-	draftId: number;
-	draftFailed: boolean;
 	previewMessageId?: number;
 	statusMessageId?: number;
 	lastPreviewAt: number;
@@ -69,6 +68,12 @@ type AgentEventMessage = Extract<
 	{ type: "message_end" | "message_start" | "message_update" }
 >["message"];
 type AssistantEventMessage = Extract<AgentEventMessage, { role: "assistant" }>;
+type DynamicCommand = Extract<RpcResponse, { success: true; command: "get_commands" }>["data"]["commands"][number];
+type DynamicCommandMenu = {
+	aliases: Map<string, string>;
+	commands: BotCommand[];
+	skipped: Array<{ name: string; reason: string }>;
+};
 type ResumeScope = "workspace" | "all";
 
 type TreeNodeDisplay = { id: string; label: string; depth: number; entry: SessionTreeNode["entry"] };
@@ -170,6 +175,18 @@ export const TELEGRAM_GROUP_COMMANDS: BotCommand[] = TELEGRAM_BOT_COMMANDS.filte
 	(command) => command.command !== "quit",
 );
 
+const STATIC_REAL_COMMANDS = new Set([
+	...TELEGRAM_NATIVE_COMMANDS.map((command) => command.command),
+	...PI_BUILTIN_SLASH_COMMANDS.map((command) => command.name),
+]);
+const RESERVED_TELEGRAM_COMMANDS = new Set([
+	...TELEGRAM_BOT_COMMANDS.map((command) => command.command),
+	...PI_BUILTIN_SLASH_COMMANDS.map((command) => command.name),
+]);
+const MAX_TELEGRAM_COMMANDS = 100;
+const MAX_TELEGRAM_COMMAND_LENGTH = 32;
+const MAX_TELEGRAM_COMMAND_DESCRIPTION_LENGTH = 256;
+
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
@@ -200,6 +217,25 @@ function commandParts(text: string, botUsername: string | undefined): { command:
 		return undefined;
 	}
 	return { command: PI_COMMAND_ALIASES.get(name.toLowerCase()) ?? name.toLowerCase(), args: rest.join(" ").trim() };
+}
+
+function telegramCommandAlias(command: string): string | undefined {
+	const alias = command
+		.trim()
+		.replace(/^\/+/, "")
+		.toLowerCase()
+		.replace(/[^a-z0-9_]+/g, "_")
+		.replace(/^_+|_+$/g, "")
+		.slice(0, MAX_TELEGRAM_COMMAND_LENGTH);
+	return alias.length > 0 ? alias : undefined;
+}
+
+function truncateTelegramCommandDescription(description: string): string {
+	const normalized = description.replace(/\s+/g, " ").trim();
+	if (normalized.length <= MAX_TELEGRAM_COMMAND_DESCRIPTION_LENGTH) {
+		return normalized;
+	}
+	return `${normalized.slice(0, MAX_TELEGRAM_COMMAND_DESCRIPTION_LENGTH - 1)}…`;
 }
 
 function pathCommandArgument(args: string): string | undefined {
@@ -391,10 +427,6 @@ function runProcess(command: string, args: string[]): Promise<{ stdout: string; 
 	});
 }
 
-function randomDraftId(): number {
-	return (Date.now() % 2_000_000_000) + Math.floor(Math.random() * 1000) + 1;
-}
-
 export class TelegramPiBot {
 	private readonly config: TelegramBotConfig;
 	private readonly api: TelegramApi;
@@ -406,6 +438,8 @@ export class TelegramPiBot {
 	private readonly pendingInputs = new Map<string, PendingChatInput>();
 	private readonly pendingScopedModels = new Map<string, Set<string>>();
 	private readonly eventQueues = new Map<string, Promise<void>>();
+	private readonly dynamicCommandAliases = new Map<string, Map<string, string>>();
+	private readonly commandMenuSignatures = new Map<string, string>();
 	private botUser: TelegramUser | undefined;
 	private stopping = false;
 
@@ -421,14 +455,18 @@ export class TelegramPiBot {
 				this.enqueueAgentEvent(conversation, event);
 			},
 			onUiRequest: (conversation, request) => {
-				void this.handleUiRequest(conversation, request);
+				void this.handleUiRequest(conversation, request).catch((error) => {
+					console.error(`Telegram extension UI error: ${redactToken(formatError(error))}`);
+				});
 			},
 			onExit: (conversation, error) => {
 				void this.sendText(
 					conversation,
 					`Pi runtime stopped${error ? `: ${redactToken(error.message)}` : "."}`,
 					true,
-				);
+				).catch((sendError) => {
+					console.error(`Telegram runtime exit notification error: ${redactToken(formatError(sendError))}`);
+				});
 			},
 		});
 	}
@@ -456,7 +494,7 @@ export class TelegramPiBot {
 		} catch (error) {
 			console.error(`Failed to register Telegram command menu: ${redactToken(formatError(error))}`);
 		}
-		console.log(`pi-telegram connected as @${this.botUser.username ?? this.botUser.id}`);
+		console.log(`pi-tg connected as @${this.botUser.username ?? this.botUser.id}`);
 		console.log(`default workspace: ${this.config.defaultCwd}`);
 		console.log(`streaming: ${this.config.streaming}`);
 		let offset: number | undefined;
@@ -464,8 +502,8 @@ export class TelegramPiBot {
 			try {
 				const updates = await this.api.getUpdates({ offset, timeout: this.config.pollTimeoutSeconds });
 				for (const update of updates) {
-					offset = update.update_id + 1;
 					await this.handleUpdate(update);
+					offset = update.update_id + 1;
 				}
 			} catch (error) {
 				const message = error instanceof TelegramApiError ? error.message : formatError(error);
@@ -484,6 +522,93 @@ export class TelegramPiBot {
 		await this.api.setMyCommands(TELEGRAM_BOT_COMMANDS, { type: "default" });
 		await this.api.setMyCommands(TELEGRAM_BOT_COMMANDS, { type: "all_private_chats" });
 		await this.api.setMyCommands(TELEGRAM_GROUP_COMMANDS, { type: "all_group_chats" });
+	}
+
+	private baseCommandsForConversation(conversation: ConversationRef): BotCommand[] {
+		return conversation.chatType === "private" ? TELEGRAM_BOT_COMMANDS : TELEGRAM_GROUP_COMMANDS;
+	}
+
+	private buildDynamicCommandMenu(conversation: ConversationRef, commands: DynamicCommand[]): DynamicCommandMenu {
+		const baseCommands = this.baseCommandsForConversation(conversation);
+		const aliases = new Map<string, string>();
+		const visibleCommands: BotCommand[] = [];
+		const skipped: DynamicCommandMenu["skipped"] = [];
+		const visibleLimit = Math.max(0, MAX_TELEGRAM_COMMANDS - baseCommands.length);
+
+		for (const command of [...commands].sort((left, right) => left.name.localeCompare(right.name))) {
+			const realCommand = command.name.trim().replace(/^\/+/, "");
+			if (!realCommand || STATIC_REAL_COMMANDS.has(realCommand)) {
+				continue;
+			}
+			const alias = telegramCommandAlias(realCommand);
+			if (!alias) {
+				skipped.push({ name: realCommand, reason: "no Telegram-safe alias" });
+				continue;
+			}
+			if (RESERVED_TELEGRAM_COMMANDS.has(alias)) {
+				skipped.push({ name: realCommand, reason: `alias /${alias} conflicts with a built-in command` });
+				continue;
+			}
+			if (aliases.has(alias)) {
+				skipped.push({ name: realCommand, reason: `alias /${alias} conflicts with another workspace command` });
+				continue;
+			}
+			aliases.set(alias, realCommand);
+			if (visibleCommands.length < visibleLimit) {
+				const description =
+					truncateTelegramCommandDescription(command.description ?? "") || `${command.source} command`;
+				visibleCommands.push({
+					command: alias,
+					description,
+				});
+			} else {
+				skipped.push({ name: realCommand, reason: "Telegram command menu is full" });
+			}
+		}
+
+		return { aliases, commands: visibleCommands, skipped };
+	}
+
+	private async refreshChatCommandMenu(conversation: ConversationRef, force = false): Promise<void> {
+		try {
+			const response = await this.manager.sendCommand(conversation, { type: "get_commands" });
+			if (!isCommandResponse(response, "get_commands")) {
+				console.error(`Failed to load Pi commands: ${redactToken(responseError(response))}`);
+				return;
+			}
+
+			const dynamicMenu = this.buildDynamicCommandMenu(conversation, response.data.commands);
+			this.dynamicCommandAliases.set(conversation.chatId, dynamicMenu.aliases);
+			const commands = [...this.baseCommandsForConversation(conversation), ...dynamicMenu.commands];
+			const signature = JSON.stringify(commands);
+			if (!force && this.commandMenuSignatures.get(conversation.chatId) === signature) {
+				return;
+			}
+
+			await this.api.setMyCommands(commands, { type: "chat", chat_id: conversation.chatId });
+			this.commandMenuSignatures.set(conversation.chatId, signature);
+		} catch (error) {
+			console.error(`Failed to refresh Telegram command menu: ${redactToken(formatError(error))}`);
+		}
+	}
+
+	private async ensureChatCommandMenu(conversation: ConversationRef): Promise<void> {
+		if (this.commandMenuSignatures.has(conversation.chatId)) {
+			return;
+		}
+		await this.refreshChatCommandMenu(conversation);
+	}
+
+	private async resolveTelegramCommand(conversation: ConversationRef, command: string): Promise<string> {
+		const cached = this.dynamicCommandAliases.get(conversation.chatId)?.get(command);
+		if (cached) {
+			return cached;
+		}
+		if (STATIC_REAL_COMMANDS.has(command)) {
+			return command;
+		}
+		await this.refreshChatCommandMenu(conversation);
+		return this.dynamicCommandAliases.get(conversation.chatId)?.get(command) ?? command;
 	}
 
 	private conversationFromMessage(message: TelegramMessage): ConversationRef {
@@ -642,7 +767,9 @@ export class TelegramPiBot {
 		const error = await this.manager.prompt(conversation, prompt);
 		if (error) {
 			await this.sendText(conversation, `Error: ${redactToken(error)}`, true);
+			return;
 		}
+		await this.ensureChatCommandMenu(conversation);
 	}
 
 	private async handleCommand(
@@ -651,10 +778,11 @@ export class TelegramPiBot {
 		command: string,
 		args: string,
 	): Promise<void> {
-		switch (command) {
+		const resolvedCommand = await this.resolveTelegramCommand(conversation, command);
+		switch (resolvedCommand) {
 			case "start":
 			case "help":
-				await this.sendText(conversation, this.helpText(), true);
+				await this.sendText(conversation, await this.helpText(conversation), true);
 				return;
 			case "settings":
 				await this.showSettings(conversation);
@@ -727,12 +855,13 @@ export class TelegramPiBot {
 				await this.confirmQuit(conversation, message);
 				return;
 			default:
-				await this.manager.prompt(conversation, `/${command}${args ? ` ${args}` : ""}`);
+				await this.manager.prompt(conversation, `/${resolvedCommand}${args ? ` ${args}` : ""}`);
+				await this.ensureChatCommandMenu(conversation);
 		}
 	}
 
-	private helpText(): string {
-		return [
+	private async helpText(conversation: ConversationRef): Promise<string> {
+		const lines = [
 			"Pi Telegram client",
 			"",
 			"Telegram-native:",
@@ -740,22 +869,65 @@ export class TelegramPiBot {
 			"",
 			"Pi commands:",
 			...TELEGRAM_PI_COMMANDS.map((command) => `/${command.command} - ${command.description}`),
+		];
+
+		try {
+			const response = await this.manager.sendCommand(conversation, { type: "get_commands" });
+			if (isCommandResponse(response, "get_commands")) {
+				const dynamicMenu = this.buildDynamicCommandMenu(conversation, response.data.commands);
+				this.dynamicCommandAliases.set(conversation.chatId, dynamicMenu.aliases);
+				const commands = [...this.baseCommandsForConversation(conversation), ...dynamicMenu.commands];
+				const signature = JSON.stringify(commands);
+				if (this.commandMenuSignatures.get(conversation.chatId) !== signature) {
+					try {
+						await this.api.setMyCommands(commands, { type: "chat", chat_id: conversation.chatId });
+						this.commandMenuSignatures.set(conversation.chatId, signature);
+					} catch (error) {
+						console.error(`Failed to refresh Telegram command menu: ${redactToken(formatError(error))}`);
+					}
+				}
+
+				if (dynamicMenu.commands.length > 0) {
+					lines.push("", "Workspace commands:");
+					for (const command of dynamicMenu.commands) {
+						const realCommand = dynamicMenu.aliases.get(command.command);
+						const mapping = realCommand && realCommand !== command.command ? ` → /${realCommand}` : "";
+						lines.push(`/${command.command}${mapping} - ${command.description}`);
+					}
+				}
+
+				if (dynamicMenu.skipped.length > 0) {
+					lines.push("", "---", "Skipped workspace commands:");
+					for (const skipped of dynamicMenu.skipped) {
+						lines.push(`/${skipped.name} - ${skipped.reason}`);
+					}
+				}
+			} else {
+				lines.push("", `Workspace commands unavailable: ${redactToken(responseError(response))}`);
+			}
+		} catch (error) {
+			lines.push("", `Workspace commands unavailable: ${redactToken(formatError(error))}`);
+		}
+
+		lines.push(
 			"",
-			"Use buttons for menus and confirmations. Normal messages are sent to pi with full tool access as the user running pi-telegram.",
-		].join("\n");
+			"Use buttons for menus and confirmations. Normal messages are sent to pi with full tool access as the user running pi-tg.",
+		);
+		return lines.join("\n");
 	}
 
 	private async handleSimpleResponse(
 		conversation: ConversationRef,
 		command: RpcCommand,
 		successText: string,
+		options?: { refreshCommands?: boolean },
 	): Promise<void> {
 		const response = await this.manager.sendCommand(conversation, command);
-		await this.sendText(
-			conversation,
-			isSuccess(response) ? successText : `Error: ${redactToken(responseError(response))}`,
-			true,
-		);
+		const success = isSuccess(response);
+		await this.sendText(conversation, success ? successText : `Error: ${redactToken(responseError(response))}`, true);
+		if (success && options?.refreshCommands) {
+			await this.refreshChatCommandMenu(conversation, true);
+		}
 	}
 
 	private async handleExport(conversation: ConversationRef, args: string): Promise<void> {
@@ -787,7 +959,7 @@ export class TelegramPiBot {
 	}
 
 	private async handleShare(conversation: ConversationRef): Promise<void> {
-		const tmpFile = join(tmpdir(), `pi-telegram-session-${randomUUID()}.html`);
+		const tmpFile = join(tmpdir(), `pi-tg-session-${randomUUID()}.html`);
 		const exportResponse = await this.manager.sendCommand(conversation, { type: "export_html", outputPath: tmpFile });
 		if (!isCommandResponse(exportResponse, "export_html")) {
 			await this.sendText(conversation, `Error: ${redactToken(responseError(exportResponse))}`, true);
@@ -1010,7 +1182,7 @@ export class TelegramPiBot {
 			replyMarkup,
 		};
 		try {
-			await this.api.editRichMessage(options);
+			await this.api.editMessageText({ ...options, text: formatTelegramMarkdown(text), parseMode: "MarkdownV2" });
 		} catch {
 			await this.api.editMessageText(options);
 		}
@@ -1026,7 +1198,7 @@ export class TelegramPiBot {
 				await this.handleSimpleResponse(conversation, { type: "abort" }, "Stopped the current run.");
 				return;
 			case "show_help":
-				await this.sendText(conversation, this.helpText(), true);
+				await this.sendText(conversation, await this.helpText(conversation), true);
 				return;
 			case "show_settings":
 				await this.showSettings(conversation, message);
@@ -1123,7 +1295,9 @@ export class TelegramPiBot {
 				await this.handleLogout(conversation, message);
 				return;
 			case "new_session":
-				await this.handleSimpleResponse(conversation, { type: "new_session" }, "Started a new pi session.");
+				await this.handleSimpleResponse(conversation, { type: "new_session" }, "Started a new pi session.", {
+					refreshCommands: true,
+				});
 				return;
 			case "show_compact":
 				await this.handleCompact(conversation, "", message);
@@ -1150,10 +1324,11 @@ export class TelegramPiBot {
 					conversation,
 					{ type: "reload" },
 					"Reloaded keybindings, extensions, skills, prompts, and themes.",
+					{ refreshCommands: true },
 				);
 				return;
 			case "quit":
-				await this.sendText(conversation, "Stopping pi-telegram.", true);
+				await this.sendText(conversation, "Stopping pi-tg.", true);
 				await this.stop();
 				return;
 		}
@@ -1567,7 +1742,7 @@ export class TelegramPiBot {
 		format: "html" | "jsonl",
 		outputPath?: string,
 	): Promise<void> {
-		const path = outputPath ?? join(tmpdir(), `pi-telegram-session-${randomUUID()}.${format}`);
+		const path = outputPath ?? join(tmpdir(), `pi-tg-session-${randomUUID()}.${format}`);
 		const response = await this.manager.sendCommand(
 			conversation,
 			format === "jsonl" ? { type: "export_jsonl", outputPath: path } : { type: "export_html", outputPath: path },
@@ -1615,6 +1790,9 @@ export class TelegramPiBot {
 	private async importJsonlPath(conversation: ConversationRef, inputPath: string): Promise<void> {
 		const response = await this.manager.sendCommand(conversation, { type: "import_jsonl", inputPath });
 		if (isCommandResponse(response, "import_jsonl")) {
+			if (!response.data.cancelled) {
+				await this.refreshChatCommandMenu(conversation, true);
+			}
 			await this.sendText(
 				conversation,
 				response.data.cancelled
@@ -1645,7 +1823,7 @@ export class TelegramPiBot {
 				return;
 			}
 			const data = await this.api.downloadFile(file.file_path);
-			const inputPath = join(tmpdir(), `pi-telegram-import-${randomUUID()}.jsonl`);
+			const inputPath = join(tmpdir(), `pi-tg-import-${randomUUID()}.jsonl`);
 			await writeFile(inputPath, data);
 			await this.importJsonlPath(conversation, inputPath);
 		} catch (error) {
@@ -1684,6 +1862,7 @@ export class TelegramPiBot {
 		if (pending.type === "workspace") {
 			try {
 				const binding = await this.manager.setWorkspace(conversation, value);
+				await this.refreshChatCommandMenu(conversation, true);
 				await this.sendText(
 					conversation,
 					[
@@ -1773,9 +1952,9 @@ export class TelegramPiBot {
 					],
 				),
 				"",
-				"Authorized Telegram users inherit the filesystem and shell permissions of the `pi-telegram` process.",
+				"Authorized Telegram users inherit the filesystem and shell permissions of the `pi-tg` process.",
 				"",
-				"Change trust by restarting `pi-telegram` with the desired trust options or by using local Pi trust settings.",
+				"Change trust by restarting `pi-tg` with the desired trust options or by using local Pi trust settings.",
 			].join("\n"),
 		);
 	}
@@ -1787,7 +1966,7 @@ export class TelegramPiBot {
 			[
 				"**Login**",
 				"",
-				"For safety, `pi-telegram` does not collect API keys in chat.",
+				"For safety, `pi-tg` does not collect API keys in chat.",
 				"",
 				"Run provider login locally with Pi, then use Reload here.",
 			].join("\n"),
@@ -1887,20 +2066,18 @@ export class TelegramPiBot {
 			conversation,
 			{ type: "reload" },
 			"Reloaded keybindings, extensions, skills, prompts, and themes.",
+			{ refreshCommands: true },
 		);
 	}
 
 	private async confirmQuit(conversation: ConversationRef, message: TelegramMessage): Promise<void> {
 		if (!isPrivateChat(message)) {
-			await this.sendText(conversation, "Use a private bot chat to stop pi-telegram.", true);
+			await this.sendText(conversation, "Use a private bot chat to stop pi-tg.", true);
 			return;
 		}
-		await this.sendText(conversation, "Stop pi-telegram for all chats?", true, {
+		await this.sendText(conversation, "Stop pi-tg for all chats?", true, {
 			inline_keyboard: [
-				[
-					this.actionButton("Stop pi-telegram", { type: "quit" }),
-					this.actionButton("Cancel", { type: "show_session" }),
-				],
+				[this.actionButton("Stop pi-tg", { type: "quit" }), this.actionButton("Cancel", { type: "show_session" })],
 			],
 		});
 	}
@@ -2274,6 +2451,9 @@ export class TelegramPiBot {
 			return;
 		}
 		const response = await this.manager.restoreSession(conversation, sessionPath);
+		if (isCommandResponse(response, "switch_session") && !response.data.cancelled) {
+			await this.refreshChatCommandMenu(conversation, true);
+		}
 		await this.sendText(
 			conversation,
 			isSuccess(response)
@@ -2362,8 +2542,6 @@ export class TelegramPiBot {
 		switch (event.type) {
 			case "agent_start":
 				this.streaming.set(conversation.key, {
-					draftId: randomDraftId(),
-					draftFailed: false,
 					lastPreviewAt: 0,
 					lastText: "",
 				});
@@ -2417,7 +2595,7 @@ export class TelegramPiBot {
 		};
 		let state = this.streaming.get(conversation.key);
 		if (!state) {
-			state = { draftId: randomDraftId(), draftFailed: false, lastPreviewAt: 0, lastText: "" };
+			state = { lastPreviewAt: 0, lastText: "" };
 			this.streaming.set(conversation.key, state);
 			this.startTypingIndicator(conversation);
 		}
@@ -2457,56 +2635,24 @@ export class TelegramPiBot {
 		}
 	}
 
-	private canUseDraft(conversation: ConversationRef): boolean {
-		return (
-			(this.config.streaming === "auto" || this.config.streaming === "draft") && conversation.chatType === "private"
-		);
-	}
-
 	private async updateAssistantPreview(conversation: ConversationRef, text: string): Promise<void> {
 		if (!text || this.config.streaming === "off") {
 			return;
 		}
 		let state = this.streaming.get(conversation.key);
 		if (!state) {
-			state = { draftId: randomDraftId(), draftFailed: false, lastPreviewAt: 0, lastText: "" };
+			state = { lastPreviewAt: 0, lastText: "" };
 			this.streaming.set(conversation.key, state);
 			this.startTypingIndicator(conversation);
 		}
 		const now = Date.now();
-		const minInterval = this.canUseDraft(conversation) && !state.draftFailed ? 350 : 1000;
+		const minInterval = 1000;
 		if (now - state.lastPreviewAt < minInterval || text === state.lastText) {
 			return;
 		}
 		state.lastPreviewAt = now;
 		state.lastText = text;
 		const preview = truncateTelegramText(text, 3900);
-		if (this.canUseDraft(conversation) && !state.draftFailed) {
-			try {
-				await this.api.sendRichMessageDraft({
-					chatId: conversation.chatId,
-					threadId: conversation.threadId,
-					draftId: state.draftId,
-					text: preview,
-				});
-				return;
-			} catch {
-				try {
-					await this.api.sendMessageDraft({
-						chatId: conversation.chatId,
-						threadId: conversation.threadId,
-						draftId: state.draftId,
-						text: preview,
-					});
-					return;
-				} catch {
-					state.draftFailed = true;
-				}
-			}
-		}
-		if (this.config.streaming === "draft") {
-			return;
-		}
 		await this.updateEditPreview(conversation, state, preview);
 	}
 
@@ -2542,19 +2688,21 @@ export class TelegramPiBot {
 		const chunks = splitTelegramText(finalText);
 		try {
 			if (state?.previewMessageId !== undefined) {
+				const text = chunks[0] ?? finalText;
 				try {
-					await this.api.editRichMessage({
+					await this.api.editMessageText({
 						chatId: conversation.chatId,
 						threadId: conversation.threadId,
 						messageId: state.previewMessageId,
-						text: chunks[0] ?? finalText,
+						text: formatTelegramMarkdown(text),
+						parseMode: "MarkdownV2",
 					});
 				} catch {
 					await this.api.editMessageText({
 						chatId: conversation.chatId,
 						threadId: conversation.threadId,
 						messageId: state.previewMessageId,
-						text: chunks[0] ?? finalText,
+						text,
 					});
 				}
 				for (const chunk of chunks.slice(1)) {
@@ -2589,10 +2737,10 @@ export class TelegramPiBot {
 			};
 			if (richMarkdown) {
 				try {
-					await this.api.sendRichMessage(options);
+					await this.api.sendMessage({ ...options, text: formatTelegramMarkdown(chunk), parseMode: "MarkdownV2" });
 					continue;
 				} catch {
-					// Fall back to plain text if Telegram rejects rich Markdown.
+					// Fall back to plain text if Telegram rejects MarkdownV2.
 				}
 			}
 			await this.api.sendMessage(options);

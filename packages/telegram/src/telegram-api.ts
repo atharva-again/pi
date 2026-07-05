@@ -67,11 +67,13 @@ export interface BotCommand {
 
 export type ChatAction = "typing" | "upload_document" | "upload_photo" | "record_voice";
 
-export type BotCommandScope = { type: "default" } | { type: "all_private_chats" } | { type: "all_group_chats" };
+export type BotCommandScope =
+	| { type: "default" }
+	| { type: "all_private_chats" }
+	| { type: "all_group_chats" }
+	| { type: "chat"; chat_id: string | number };
 
-interface InputRichMessage {
-	markdown: string;
-}
+export type TelegramParseMode = "MarkdownV2";
 
 export interface SendMessageOptions {
 	chatId: string;
@@ -79,6 +81,7 @@ export interface SendMessageOptions {
 	threadId?: string;
 	disableNotification?: boolean;
 	replyMarkup?: InlineKeyboardMarkup;
+	parseMode?: TelegramParseMode;
 }
 
 export interface SendDocumentOptions {
@@ -150,6 +153,13 @@ function normalizeThreadId(threadId: string | undefined): number | undefined {
 	return Number.isSafeInteger(asNumber) ? asNumber : undefined;
 }
 
+function normalizeCommandScope(scope: BotCommandScope | undefined): BotCommandScope | undefined {
+	if (scope?.type !== "chat") {
+		return scope;
+	}
+	return { type: "chat", chat_id: normalizeChatId(String(scope.chat_id)) };
+}
+
 export class TelegramApiError extends Error {
 	readonly method: string;
 	readonly code?: number;
@@ -211,7 +221,7 @@ export class TelegramApi {
 	}
 
 	async setMyCommands(commands: BotCommand[], scope?: BotCommandScope): Promise<boolean> {
-		return this.request<boolean>("setMyCommands", { commands, scope });
+		return this.request<boolean>("setMyCommands", { commands, scope: normalizeCommandScope(scope) });
 	}
 
 	async sendChatAction(options: { chatId: string; threadId?: string; action: ChatAction }): Promise<boolean> {
@@ -227,17 +237,7 @@ export class TelegramApi {
 			chat_id: normalizeChatId(options.chatId),
 			message_thread_id: normalizeThreadId(options.threadId),
 			text: options.text,
-			disable_notification: options.disableNotification,
-			reply_markup: options.replyMarkup,
-		});
-	}
-
-	async sendRichMessage(options: SendMessageOptions): Promise<SentMessage> {
-		const richMessage: InputRichMessage = { markdown: options.text };
-		return this.request<SentMessage>("sendRichMessage", {
-			chat_id: normalizeChatId(options.chatId),
-			message_thread_id: normalizeThreadId(options.threadId),
-			rich_message: richMessage,
+			parse_mode: options.parseMode,
 			disable_notification: options.disableNotification,
 			reply_markup: options.replyMarkup,
 		});
@@ -270,29 +270,14 @@ export class TelegramApi {
 		text: string;
 		threadId?: string;
 		replyMarkup?: InlineKeyboardMarkup;
+		parseMode?: TelegramParseMode;
 	}): Promise<SentMessage | true> {
 		return this.request<SentMessage | true>("editMessageText", {
 			chat_id: normalizeChatId(options.chatId),
 			message_id: options.messageId,
 			message_thread_id: normalizeThreadId(options.threadId),
 			text: options.text,
-			reply_markup: options.replyMarkup,
-		});
-	}
-
-	async editRichMessage(options: {
-		chatId: string;
-		messageId: number;
-		text: string;
-		threadId?: string;
-		replyMarkup?: InlineKeyboardMarkup;
-	}): Promise<SentMessage | true> {
-		const richMessage: InputRichMessage = { markdown: options.text };
-		return this.request<SentMessage | true>("editMessageText", {
-			chat_id: normalizeChatId(options.chatId),
-			message_id: options.messageId,
-			message_thread_id: normalizeThreadId(options.threadId),
-			rich_message: richMessage,
+			parse_mode: options.parseMode,
 			reply_markup: options.replyMarkup,
 		});
 	}
@@ -323,34 +308,5 @@ export class TelegramApi {
 			throw new Error(`Telegram file download failed: ${response.status} ${response.statusText}`);
 		}
 		return Buffer.from(await response.arrayBuffer());
-	}
-
-	async sendMessageDraft(options: {
-		chatId: string;
-		draftId: number;
-		text: string;
-		threadId?: string;
-	}): Promise<boolean> {
-		return this.request<boolean>("sendMessageDraft", {
-			chat_id: normalizeChatId(options.chatId),
-			message_thread_id: normalizeThreadId(options.threadId),
-			draft_id: options.draftId,
-			text: options.text,
-		});
-	}
-
-	async sendRichMessageDraft(options: {
-		chatId: string;
-		draftId: number;
-		text: string;
-		threadId?: string;
-	}): Promise<boolean> {
-		const richMessage: InputRichMessage = { markdown: options.text };
-		return this.request<boolean>("sendRichMessageDraft", {
-			chat_id: normalizeChatId(options.chatId),
-			message_thread_id: normalizeThreadId(options.threadId),
-			draft_id: options.draftId,
-			rich_message: richMessage,
-		});
 	}
 }
