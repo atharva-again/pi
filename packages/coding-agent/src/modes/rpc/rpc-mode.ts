@@ -19,6 +19,7 @@ import type {
 	ExtensionWidgetOptions,
 	WorkingIndicatorOptions,
 } from "../../core/extensions/index.ts";
+import { resolveModelScopeWithDiagnostics } from "../../core/model-resolver.ts";
 import {
 	flushRawStdout,
 	takeOverStdout,
@@ -484,6 +485,28 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				return success(id, "get_available_models", { models });
 			}
 
+			case "get_scoped_models": {
+				return success(id, "get_scoped_models", { scopedModels: [...session.scopedModels] });
+			}
+
+			case "set_scoped_models": {
+				if (command.patterns.length === 0) {
+					session.setScopedModels([]);
+					return success(id, "set_scoped_models", { scopedModels: [], diagnostics: [] });
+				}
+				const result = await resolveModelScopeWithDiagnostics(command.patterns, session.modelRegistry);
+				session.setScopedModels(
+					result.scopedModels.map((scoped) => ({
+						model: scoped.model,
+						thinkingLevel: scoped.thinkingLevel,
+					})),
+				);
+				return success(id, "set_scoped_models", {
+					scopedModels: [...session.scopedModels],
+					diagnostics: result.diagnostics,
+				});
+			}
+
 			// =================================================================
 			// Thinking
 			// =================================================================
@@ -573,6 +596,19 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				return success(id, "export_html", { path });
 			}
 
+			case "export_jsonl": {
+				const path = session.exportToJsonl(command.outputPath);
+				return success(id, "export_jsonl", { path });
+			}
+
+			case "import_jsonl": {
+				const result = await runtimeHost.importFromJsonl(command.inputPath, command.cwdOverride);
+				if (!result.cancelled) {
+					await rebindSession();
+				}
+				return success(id, "import_jsonl", result);
+			}
+
 			case "switch_session": {
 				const result = await runtimeHost.switchSession(command.sessionPath);
 				if (!result.cancelled) {
@@ -624,6 +660,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				return success(id, "get_tree", { tree: sessionManager.getTree(), leafId: sessionManager.getLeafId() });
 			}
 
+			case "navigate_tree": {
+				const result = await session.navigateTree(command.entryId, { summarize: command.summarize });
+				return success(id, "navigate_tree", result);
+			}
+
 			case "get_last_assistant_text": {
 				const text = session.getLastAssistantText();
 				return success(id, "get_last_assistant_text", { text });
@@ -649,6 +690,11 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 			// Commands (available for invocation via prompt)
 			// =================================================================
+
+			case "reload": {
+				await session.reload();
+				return success(id, "reload");
+			}
 
 			case "get_commands": {
 				const commands: RpcSlashCommand[] = [];

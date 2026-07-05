@@ -9,6 +9,10 @@
 		".": {
 			"types": "./dist/index.d.ts",
 			"import": "./dist/index.js"
+		},
+		"./rpc-process": {
+			"types": "./dist/rpc-process.d.ts",
+			"import": "./dist/rpc-process.js"
 		}
 	},
 	"files": [
