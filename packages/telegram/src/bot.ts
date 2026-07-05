@@ -495,7 +495,7 @@ export class TelegramPiBot {
 		} catch (error) {
 			console.error(`Failed to register Telegram command menu: ${redactToken(formatError(error))}`);
 		}
-		console.log(`pi-telegram connected as @${this.botUser.username ?? this.botUser.id}`);
+		console.log(`pi-tg connected as @${this.botUser.username ?? this.botUser.id}`);
 		console.log(`default workspace: ${this.config.defaultCwd}`);
 		console.log(`streaming: ${this.config.streaming}`);
 		let offset: number | undefined;
@@ -912,7 +912,7 @@ export class TelegramPiBot {
 
 		lines.push(
 			"",
-			"Use buttons for menus and confirmations. Normal messages are sent to pi with full tool access as the user running pi-telegram.",
+			"Use buttons for menus and confirmations. Normal messages are sent to pi with full tool access as the user running pi-tg.",
 		);
 		return lines.join("\n");
 	}
@@ -960,7 +960,7 @@ export class TelegramPiBot {
 	}
 
 	private async handleShare(conversation: ConversationRef): Promise<void> {
-		const tmpFile = join(tmpdir(), `pi-telegram-session-${randomUUID()}.html`);
+		const tmpFile = join(tmpdir(), `pi-tg-session-${randomUUID()}.html`);
 		const exportResponse = await this.manager.sendCommand(conversation, { type: "export_html", outputPath: tmpFile });
 		if (!isCommandResponse(exportResponse, "export_html")) {
 			await this.sendText(conversation, `Error: ${redactToken(responseError(exportResponse))}`, true);
@@ -1329,7 +1329,7 @@ export class TelegramPiBot {
 				);
 				return;
 			case "quit":
-				await this.sendText(conversation, "Stopping pi-telegram.", true);
+				await this.sendText(conversation, "Stopping pi-tg.", true);
 				await this.stop();
 				return;
 		}
@@ -1743,7 +1743,7 @@ export class TelegramPiBot {
 		format: "html" | "jsonl",
 		outputPath?: string,
 	): Promise<void> {
-		const path = outputPath ?? join(tmpdir(), `pi-telegram-session-${randomUUID()}.${format}`);
+		const path = outputPath ?? join(tmpdir(), `pi-tg-session-${randomUUID()}.${format}`);
 		const response = await this.manager.sendCommand(
 			conversation,
 			format === "jsonl" ? { type: "export_jsonl", outputPath: path } : { type: "export_html", outputPath: path },
@@ -1824,7 +1824,7 @@ export class TelegramPiBot {
 				return;
 			}
 			const data = await this.api.downloadFile(file.file_path);
-			const inputPath = join(tmpdir(), `pi-telegram-import-${randomUUID()}.jsonl`);
+			const inputPath = join(tmpdir(), `pi-tg-import-${randomUUID()}.jsonl`);
 			await writeFile(inputPath, data);
 			await this.importJsonlPath(conversation, inputPath);
 		} catch (error) {
@@ -1953,9 +1953,9 @@ export class TelegramPiBot {
 					],
 				),
 				"",
-				"Authorized Telegram users inherit the filesystem and shell permissions of the `pi-telegram` process.",
+				"Authorized Telegram users inherit the filesystem and shell permissions of the `pi-tg` process.",
 				"",
-				"Change trust by restarting `pi-telegram` with the desired trust options or by using local Pi trust settings.",
+				"Change trust by restarting `pi-tg` with the desired trust options or by using local Pi trust settings.",
 			].join("\n"),
 		);
 	}
@@ -1967,7 +1967,7 @@ export class TelegramPiBot {
 			[
 				"**Login**",
 				"",
-				"For safety, `pi-telegram` does not collect API keys in chat.",
+				"For safety, `pi-tg` does not collect API keys in chat.",
 				"",
 				"Run provider login locally with Pi, then use Reload here.",
 			].join("\n"),
@@ -2073,15 +2073,12 @@ export class TelegramPiBot {
 
 	private async confirmQuit(conversation: ConversationRef, message: TelegramMessage): Promise<void> {
 		if (!isPrivateChat(message)) {
-			await this.sendText(conversation, "Use a private bot chat to stop pi-telegram.", true);
+			await this.sendText(conversation, "Use a private bot chat to stop pi-tg.", true);
 			return;
 		}
-		await this.sendText(conversation, "Stop pi-telegram for all chats?", true, {
+		await this.sendText(conversation, "Stop pi-tg for all chats?", true, {
 			inline_keyboard: [
-				[
-					this.actionButton("Stop pi-telegram", { type: "quit" }),
-					this.actionButton("Cancel", { type: "show_session" }),
-				],
+				[this.actionButton("Stop pi-tg", { type: "quit" }), this.actionButton("Cancel", { type: "show_session" })],
 			],
 		});
 	}

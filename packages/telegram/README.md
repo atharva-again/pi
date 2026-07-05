@@ -11,12 +11,12 @@ Experimental Telegram client for pi.
 ```bash
 PI_TELEGRAM_BOT_TOKEN=123:abc \
 PI_TELEGRAM_ALLOWED_USERS=123456789 \
-pi-telegram
+pi-tg
 ```
 
 The bot uses the same pi provider configuration and credentials as the CLI.
 Authorized Telegram users inherit the filesystem and shell permissions of the
-user running `pi-telegram`.
+user running `pi-tg`.
 
 ## Telegram UX
 
@@ -25,7 +25,7 @@ user running `pi-telegram`.
 - `/scoped_models` is the Telegram-safe alias for Pi's `/scoped-models` command.
 - Menu-like commands use inline buttons, confirmations, document upload/download, and per-chat pending prompts.
 - Workspace changes are available from `/settings` and `/session` buttons without adding an extra slash command.
-- Normal messages are sent to pi with full tool access as the user running `pi-telegram`.
+- Normal messages are sent to pi with full tool access as the user running `pi-tg`.
 
 ## Commands
 
@@ -57,4 +57,4 @@ Pi commands:
 - `/compact` - compact now or prompt for custom instructions
 - `/resume` - recent-session picker or `/resume <id-or-path>`
 - `/reload` - reload keybindings, extensions, skills, prompts, and themes
-- `/quit` - private-chat confirmation to stop `pi-telegram`
+- `/quit` - private-chat confirmation to stop `pi-tg`

@@ -1,10 +1,10 @@
 {
-	"name": "pi-telegram",
+	"name": "pi-tg",
 	"version": "0.80.3",
 	"description": "Telegram client for pi",
 	"type": "module",
 	"bin": {
-		"pi-telegram": "dist/cli.js"
+		"pi-tg": "dist/cli.js"
 	},
 	"main": "./dist/index.js",
 	"types": "./dist/index.d.ts",
