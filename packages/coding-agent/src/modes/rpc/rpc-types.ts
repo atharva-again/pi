@@ -105,6 +105,7 @@ export interface RpcSessionState {
 	isCompacting: boolean;
 	steeringMode: "all" | "one-at-a-time";
 	followUpMode: "all" | "one-at-a-time";
+	cwd: string;
 	sessionFile?: string;
 	sessionId: string;
 	sessionName?: string;

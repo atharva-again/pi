@@ -118,6 +118,7 @@ export class PiConversationManager {
 		}
 		live.binding = {
 			...live.binding,
+			cwd: response.data.cwd,
 			sessionFile: response.data.sessionFile,
 			sessionId: response.data.sessionId,
 			updatedAt: new Date().toISOString(),

@@ -73,9 +73,7 @@ export type BotCommandScope =
 	| { type: "all_group_chats" }
 	| { type: "chat"; chat_id: string | number };
 
-interface InputRichMessage {
-	markdown: string;
-}
+export type TelegramParseMode = "MarkdownV2";
 
 export interface SendMessageOptions {
 	chatId: string;
@@ -83,6 +81,7 @@ export interface SendMessageOptions {
 	threadId?: string;
 	disableNotification?: boolean;
 	replyMarkup?: InlineKeyboardMarkup;
+	parseMode?: TelegramParseMode;
 }
 
 export interface SendDocumentOptions {
@@ -238,17 +237,7 @@ export class TelegramApi {
 			chat_id: normalizeChatId(options.chatId),
 			message_thread_id: normalizeThreadId(options.threadId),
 			text: options.text,
-			disable_notification: options.disableNotification,
-			reply_markup: options.replyMarkup,
-		});
-	}
-
-	async sendRichMessage(options: SendMessageOptions): Promise<SentMessage> {
-		const richMessage: InputRichMessage = { markdown: options.text };
-		return this.request<SentMessage>("sendRichMessage", {
-			chat_id: normalizeChatId(options.chatId),
-			message_thread_id: normalizeThreadId(options.threadId),
-			rich_message: richMessage,
+			parse_mode: options.parseMode,
 			disable_notification: options.disableNotification,
 			reply_markup: options.replyMarkup,
 		});
@@ -281,29 +270,14 @@ export class TelegramApi {
 		text: string;
 		threadId?: string;
 		replyMarkup?: InlineKeyboardMarkup;
+		parseMode?: TelegramParseMode;
 	}): Promise<SentMessage | true> {
 		return this.request<SentMessage | true>("editMessageText", {
 			chat_id: normalizeChatId(options.chatId),
 			message_id: options.messageId,
 			message_thread_id: normalizeThreadId(options.threadId),
 			text: options.text,
-			reply_markup: options.replyMarkup,
-		});
-	}
-
-	async editRichMessage(options: {
-		chatId: string;
-		messageId: number;
-		text: string;
-		threadId?: string;
-		replyMarkup?: InlineKeyboardMarkup;
-	}): Promise<SentMessage | true> {
-		const richMessage: InputRichMessage = { markdown: options.text };
-		return this.request<SentMessage | true>("editMessageText", {
-			chat_id: normalizeChatId(options.chatId),
-			message_id: options.messageId,
-			message_thread_id: normalizeThreadId(options.threadId),
-			rich_message: richMessage,
+			parse_mode: options.parseMode,
 			reply_markup: options.replyMarkup,
 		});
 	}
@@ -334,34 +308,5 @@ export class TelegramApi {
 			throw new Error(`Telegram file download failed: ${response.status} ${response.statusText}`);
 		}
 		return Buffer.from(await response.arrayBuffer());
-	}
-
-	async sendMessageDraft(options: {
-		chatId: string;
-		draftId: number;
-		text: string;
-		threadId?: string;
-	}): Promise<boolean> {
-		return this.request<boolean>("sendMessageDraft", {
-			chat_id: normalizeChatId(options.chatId),
-			message_thread_id: normalizeThreadId(options.threadId),
-			draft_id: options.draftId,
-			text: options.text,
-		});
-	}
-
-	async sendRichMessageDraft(options: {
-		chatId: string;
-		draftId: number;
-		text: string;
-		threadId?: string;
-	}): Promise<boolean> {
-		const richMessage: InputRichMessage = { markdown: options.text };
-		return this.request<boolean>("sendRichMessageDraft", {
-			chat_id: normalizeChatId(options.chatId),
-			message_thread_id: normalizeThreadId(options.threadId),
-			draft_id: options.draftId,
-			rich_message: richMessage,
-		});
 	}
 }

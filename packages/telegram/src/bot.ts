@@ -33,14 +33,13 @@ import {
 import {
 	extractMessageText,
 	formatError,
+	formatTelegramMarkdown,
 	splitTelegramText,
 	truncateTelegramButtonText,
 	truncateTelegramText,
 } from "./text.ts";
 
 interface StreamingState {
-	draftId: number;
-	draftFailed: boolean;
 	previewMessageId?: number;
 	statusMessageId?: number;
 	lastPreviewAt: number;
@@ -428,10 +427,6 @@ function runProcess(command: string, args: string[]): Promise<{ stdout: string; 
 	});
 }
 
-function randomDraftId(): number {
-	return (Date.now() % 2_000_000_000) + Math.floor(Math.random() * 1000) + 1;
-}
-
 export class TelegramPiBot {
 	private readonly config: TelegramBotConfig;
 	private readonly api: TelegramApi;
@@ -460,14 +455,18 @@ export class TelegramPiBot {
 				this.enqueueAgentEvent(conversation, event);
 			},
 			onUiRequest: (conversation, request) => {
-				void this.handleUiRequest(conversation, request);
+				void this.handleUiRequest(conversation, request).catch((error) => {
+					console.error(`Telegram extension UI error: ${redactToken(formatError(error))}`);
+				});
 			},
 			onExit: (conversation, error) => {
 				void this.sendText(
 					conversation,
 					`Pi runtime stopped${error ? `: ${redactToken(error.message)}` : "."}`,
 					true,
-				);
+				).catch((sendError) => {
+					console.error(`Telegram runtime exit notification error: ${redactToken(formatError(sendError))}`);
+				});
 			},
 		});
 	}
@@ -503,8 +502,8 @@ export class TelegramPiBot {
 			try {
 				const updates = await this.api.getUpdates({ offset, timeout: this.config.pollTimeoutSeconds });
 				for (const update of updates) {
-					offset = update.update_id + 1;
 					await this.handleUpdate(update);
+					offset = update.update_id + 1;
 				}
 			} catch (error) {
 				const message = error instanceof TelegramApiError ? error.message : formatError(error);
@@ -1183,7 +1182,7 @@ export class TelegramPiBot {
 			replyMarkup,
 		};
 		try {
-			await this.api.editRichMessage(options);
+			await this.api.editMessageText({ ...options, text: formatTelegramMarkdown(text), parseMode: "MarkdownV2" });
 		} catch {
 			await this.api.editMessageText(options);
 		}
@@ -2543,8 +2542,6 @@ export class TelegramPiBot {
 		switch (event.type) {
 			case "agent_start":
 				this.streaming.set(conversation.key, {
-					draftId: randomDraftId(),
-					draftFailed: false,
 					lastPreviewAt: 0,
 					lastText: "",
 				});
@@ -2598,7 +2595,7 @@ export class TelegramPiBot {
 		};
 		let state = this.streaming.get(conversation.key);
 		if (!state) {
-			state = { draftId: randomDraftId(), draftFailed: false, lastPreviewAt: 0, lastText: "" };
+			state = { lastPreviewAt: 0, lastText: "" };
 			this.streaming.set(conversation.key, state);
 			this.startTypingIndicator(conversation);
 		}
@@ -2638,56 +2635,24 @@ export class TelegramPiBot {
 		}
 	}
 
-	private canUseDraft(conversation: ConversationRef): boolean {
-		return (
-			(this.config.streaming === "auto" || this.config.streaming === "draft") && conversation.chatType === "private"
-		);
-	}
-
 	private async updateAssistantPreview(conversation: ConversationRef, text: string): Promise<void> {
 		if (!text || this.config.streaming === "off") {
 			return;
 		}
 		let state = this.streaming.get(conversation.key);
 		if (!state) {
-			state = { draftId: randomDraftId(), draftFailed: false, lastPreviewAt: 0, lastText: "" };
+			state = { lastPreviewAt: 0, lastText: "" };
 			this.streaming.set(conversation.key, state);
 			this.startTypingIndicator(conversation);
 		}
 		const now = Date.now();
-		const minInterval = this.canUseDraft(conversation) && !state.draftFailed ? 350 : 1000;
+		const minInterval = 1000;
 		if (now - state.lastPreviewAt < minInterval || text === state.lastText) {
 			return;
 		}
 		state.lastPreviewAt = now;
 		state.lastText = text;
 		const preview = truncateTelegramText(text, 3900);
-		if (this.canUseDraft(conversation) && !state.draftFailed) {
-			try {
-				await this.api.sendRichMessageDraft({
-					chatId: conversation.chatId,
-					threadId: conversation.threadId,
-					draftId: state.draftId,
-					text: preview,
-				});
-				return;
-			} catch {
-				try {
-					await this.api.sendMessageDraft({
-						chatId: conversation.chatId,
-						threadId: conversation.threadId,
-						draftId: state.draftId,
-						text: preview,
-					});
-					return;
-				} catch {
-					state.draftFailed = true;
-				}
-			}
-		}
-		if (this.config.streaming === "draft") {
-			return;
-		}
 		await this.updateEditPreview(conversation, state, preview);
 	}
 
@@ -2723,19 +2688,21 @@ export class TelegramPiBot {
 		const chunks = splitTelegramText(finalText);
 		try {
 			if (state?.previewMessageId !== undefined) {
+				const text = chunks[0] ?? finalText;
 				try {
-					await this.api.editRichMessage({
+					await this.api.editMessageText({
 						chatId: conversation.chatId,
 						threadId: conversation.threadId,
 						messageId: state.previewMessageId,
-						text: chunks[0] ?? finalText,
+						text: formatTelegramMarkdown(text),
+						parseMode: "MarkdownV2",
 					});
 				} catch {
 					await this.api.editMessageText({
 						chatId: conversation.chatId,
 						threadId: conversation.threadId,
 						messageId: state.previewMessageId,
-						text: chunks[0] ?? finalText,
+						text,
 					});
 				}
 				for (const chunk of chunks.slice(1)) {
@@ -2770,10 +2737,10 @@ export class TelegramPiBot {
 			};
 			if (richMarkdown) {
 				try {
-					await this.api.sendRichMessage(options);
+					await this.api.sendMessage({ ...options, text: formatTelegramMarkdown(chunk), parseMode: "MarkdownV2" });
 					continue;
 				} catch {
-					// Fall back to plain text if Telegram rejects rich Markdown.
+					// Fall back to plain text if Telegram rejects MarkdownV2.
 				}
 			}
 			await this.api.sendMessage(options);

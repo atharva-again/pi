@@ -2,7 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { dirname, join, resolve } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-export type TelegramStreamingMode = "auto" | "draft" | "edit" | "off";
+export type TelegramStreamingMode = "auto" | "edit" | "off";
 
 export interface TelegramBotConfig {
 	token: string;
@@ -85,7 +85,7 @@ function asTelegramConfigFile(value: unknown): TelegramConfigFile {
 	}
 	const streaming = value.streaming === undefined ? undefined : parseStreamingMode(value.streaming);
 	if (value.streaming !== undefined && !streaming) {
-		throw new Error("Invalid streaming mode in config file. Use auto, draft, edit, or off.");
+		throw new Error("Invalid streaming mode in config file. Use auto, edit, or off.");
 	}
 	return {
 		token: optionalString(value.token, "token"),
@@ -153,7 +153,7 @@ function configSet(flagOrEnvValue: string | undefined, configValue: string[] | u
 
 function parseStreamingMode(value: string | undefined): TelegramStreamingMode | undefined {
 	if (value === undefined || value === "") return "auto";
-	if (value === "auto" || value === "draft" || value === "edit" || value === "off") {
+	if (value === "auto" || value === "edit" || value === "off") {
 		return value;
 	}
 	return undefined;
@@ -241,7 +241,7 @@ export function parseTelegramCliArgs(args: string[]): CliParseResult {
 		errors.push(`Workspace does not exist: ${defaultCwd}`);
 	}
 	if (!streaming) {
-		errors.push("Invalid streaming mode. Use auto, draft, edit, or off.");
+		errors.push("Invalid streaming mode. Use auto, edit, or off.");
 	}
 	if (pollTimeoutSeconds === undefined) {
 		errors.push("Invalid poll timeout. Use a number from 1 to 50 seconds.");
@@ -268,7 +268,7 @@ export function parseTelegramCliArgs(args: string[]): CliParseResult {
 }
 
 export function formatTelegramHelp(version: string): string {
-	return `pi-tg v${version}\n\nUsage:\n  pi-tg                 Start using saved config\n  pi-tg setup           Create ${getTelegramConfigPath()}\n  pi-tg doctor          Validate config and bot token\n  pi-tg start [options] Start with flags/env overriding saved config\n  pi-tg --help\n  pi-tg --version\n\nInstall:\n  npm install -g pi-tg\n  pi-tg setup\n  pi-tg doctor\n  pi-tg\n\nOptions:\n  --token <token>             Telegram bot token (or PI_TELEGRAM_BOT_TOKEN)\n  --allowed-users <ids>       Comma-separated Telegram user IDs\n  --allowed-chats <ids>       Comma-separated chat IDs for group/topic use\n  --allow-all-users           Disable user allowlist (not recommended)\n  --cwd <path>                Default workspace for new chats/topics\n  --streaming <mode>          auto, draft, edit, or off (default: auto)\n  --poll-timeout <seconds>    Long-poll timeout, 1-50 seconds (default: 25)\n  --no-approve-project        Do not pass --approve to spawned pi RPC runtimes\n\nEnvironment overrides:\n  PI_TELEGRAM_BOT_TOKEN\n  PI_TELEGRAM_ALLOWED_USERS\n  PI_TELEGRAM_ALLOWED_CHATS\n  PI_TELEGRAM_ALLOW_ALL_USERS=1\n  PI_TELEGRAM_CWD\n  PI_TELEGRAM_STREAMING=auto|draft|edit|off\n`;
+	return `pi-tg v${version}\n\nUsage:\n  pi-tg                 Start using saved config\n  pi-tg setup           Create ${getTelegramConfigPath()}\n  pi-tg doctor          Validate config and bot token\n  pi-tg start [options] Start with flags/env overriding saved config\n  pi-tg --help\n  pi-tg --version\n\nInstall:\n  npm install -g pi-tg\n  pi-tg setup\n  pi-tg doctor\n  pi-tg\n\nOptions:\n  --token <token>             Telegram bot token (or PI_TELEGRAM_BOT_TOKEN)\n  --allowed-users <ids>       Comma-separated Telegram user IDs\n  --allowed-chats <ids>       Comma-separated chat IDs for group/topic use\n  --allow-all-users           Disable user allowlist (not recommended)\n  --cwd <path>                Default workspace for new chats/topics\n  --streaming <mode>          auto, edit, or off (default: auto)\n  --poll-timeout <seconds>    Long-poll timeout, 1-50 seconds (default: 25)\n  --no-approve-project        Do not pass --approve to spawned pi RPC runtimes\n\nEnvironment overrides:\n  PI_TELEGRAM_BOT_TOKEN\n  PI_TELEGRAM_ALLOWED_USERS\n  PI_TELEGRAM_ALLOWED_CHATS\n  PI_TELEGRAM_ALLOW_ALL_USERS=1\n  PI_TELEGRAM_CWD\n  PI_TELEGRAM_STREAMING=auto|edit|off\n`;
 }
 
 export function formatTelegramSetup(): string {

@@ -12,7 +12,12 @@ import {
 } from "../src/bot.ts";
 import { parseTelegramCliArgs, type TelegramStreamingMode, writeTelegramConfigFile } from "../src/config.ts";
 import { conversationKey } from "../src/store.ts";
-import { splitTelegramText, truncateTelegramButtonText, truncateTelegramText } from "../src/text.ts";
+import {
+	formatTelegramMarkdown,
+	splitTelegramText,
+	truncateTelegramButtonText,
+	truncateTelegramText,
+} from "../src/text.ts";
 
 const TELEGRAM_CONFIG_ENV_VARS = [
 	"PI_TELEGRAM_BOT_TOKEN",
@@ -151,5 +156,9 @@ describe("telegram text helpers", () => {
 		expect(truncateTelegramText(longText, 20)).toBe("\n… truncated");
 		expect(truncateTelegramButtonText("abcdef", 4)).toBe("abc…");
 		expect(splitTelegramText(longText).length).toBeGreaterThan(1);
+	});
+
+	it("formats supported Telegram MarkdownV2", () => {
+		expect(formatTelegramMarkdown("**Session** `/tmp/a_b` | ok.")).toBe("*Session* `/tmp/a_b` \\| ok\\.");
 	});
 });
