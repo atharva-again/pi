@@ -1,6 +1,6 @@
 {
 	"name": "pi-tg",
-	"version": "0.80.3",
+	"version": "0.1.0",
 	"description": "Telegram client for pi",
 	"type": "module",
 	"bin": {
