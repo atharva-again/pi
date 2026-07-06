@@ -1,7 +1,16 @@
 {
-	"name": "pi-tg",
-	"version": "0.1.0",
+	"name": "@atharva-again/pi-tg",
+	"version": "0.1.3",
 	"description": "Telegram client for pi",
+	"homepage": "https://github.com/atharva-again/pi#readme",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/atharva-again/pi.git",
+		"directory": "packages/telegram"
+	},
+	"bugs": {
+		"url": "https://github.com/atharva-again/pi/issues"
+	},
 	"type": "module",
 	"bin": {
 		"pi-tg": "dist/cli.js"
@@ -38,7 +47,7 @@
 	},
 	"dependencies": {
 		"@earendil-works/pi-agent-core": "^0.80.3",
-		"@earendil-works/pi-coding-agent": "^0.80.3"
+		"@earendil-works/pi-coding-agent": "https://registry.npmjs.org/@atharva-again/pi-coding-agent/-/pi-coding-agent-0.80.3-pi-tg.1.tgz"
 	},
 	"devDependencies": {
 		"shx": "0.4.0",

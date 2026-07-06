@@ -1,13 +1,13 @@
 # pi Telegram
 
-Experimental Telegram client for pi, published as `pi-tg`.
+Experimental Telegram client for pi, published as `@atharva-again/pi-tg` with the `pi-tg` binary.
 
 ## Quick start
 
 1. Install the package:
 
 ```bash
-npm install -g pi-tg
+npm install -g @atharva-again/pi-tg
 ```
 
 2. Create a Telegram bot with [@BotFather](https://t.me/BotFather).
