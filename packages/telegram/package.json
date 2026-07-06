@@ -38,7 +38,7 @@
 	},
 	"dependencies": {
 		"@earendil-works/pi-agent-core": "^0.80.3",
-		"@earendil-works/pi-coding-agent": "^0.80.3"
+		"@earendil-works/pi-coding-agent": "https://registry.npmjs.org/@atharva-again/pi-coding-agent/-/pi-coding-agent-0.80.3-pi-tg.1.tgz"
 	},
 	"devDependencies": {
 		"shx": "0.4.0",
