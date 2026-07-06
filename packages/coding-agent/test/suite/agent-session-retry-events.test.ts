@@ -252,6 +252,7 @@ describe("AgentSession retry and event characterization", () => {
 			"message_update",
 			"message_end:assistant",
 			"turn_end",
+			"entry_appended",
 			"agent_end",
 		]);
 	});
@@ -297,6 +298,7 @@ describe("AgentSession retry and event characterization", () => {
 			"message_update",
 			"message_end:assistant",
 			"turn_end",
+			"entry_appended",
 			"agent_end",
 		]);
 	});
