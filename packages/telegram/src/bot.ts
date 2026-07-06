@@ -33,7 +33,6 @@ import {
 import {
 	extractMessageText,
 	formatError,
-	formatTelegramMarkdown,
 	splitTelegramText,
 	truncateTelegramButtonText,
 	truncateTelegramText,
@@ -1182,7 +1181,7 @@ export class TelegramPiBot {
 			replyMarkup,
 		};
 		try {
-			await this.api.editMessageText({ ...options, text: formatTelegramMarkdown(text), parseMode: "MarkdownV2" });
+			await this.api.editRichMessage(options);
 		} catch {
 			await this.api.editMessageText(options);
 		}
@@ -2690,12 +2689,11 @@ export class TelegramPiBot {
 			if (state?.previewMessageId !== undefined) {
 				const text = chunks[0] ?? finalText;
 				try {
-					await this.api.editMessageText({
+					await this.api.editRichMessage({
 						chatId: conversation.chatId,
 						threadId: conversation.threadId,
 						messageId: state.previewMessageId,
-						text: formatTelegramMarkdown(text),
-						parseMode: "MarkdownV2",
+						text,
 					});
 				} catch {
 					await this.api.editMessageText({
@@ -2737,10 +2735,10 @@ export class TelegramPiBot {
 			};
 			if (richMarkdown) {
 				try {
-					await this.api.sendMessage({ ...options, text: formatTelegramMarkdown(chunk), parseMode: "MarkdownV2" });
+					await this.api.sendRichMessage(options);
 					continue;
 				} catch {
-					// Fall back to plain text if Telegram rejects MarkdownV2.
+					// Fall back to plain text if Telegram rejects rich Markdown.
 				}
 			}
 			await this.api.sendMessage(options);

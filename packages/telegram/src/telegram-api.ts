@@ -75,6 +75,10 @@ export type BotCommandScope =
 
 export type TelegramParseMode = "MarkdownV2";
 
+interface InputRichMessage {
+	markdown: string;
+}
+
 export interface SendMessageOptions {
 	chatId: string;
 	text: string;
@@ -243,6 +247,17 @@ export class TelegramApi {
 		});
 	}
 
+	async sendRichMessage(options: SendMessageOptions): Promise<SentMessage> {
+		const richMessage: InputRichMessage = { markdown: options.text };
+		return this.request<SentMessage>("sendRichMessage", {
+			chat_id: normalizeChatId(options.chatId),
+			message_thread_id: normalizeThreadId(options.threadId),
+			rich_message: richMessage,
+			disable_notification: options.disableNotification,
+			reply_markup: options.replyMarkup,
+		});
+	}
+
 	async sendDocument(options: SendDocumentOptions): Promise<SentMessage> {
 		const form = new FormData();
 		form.append("chat_id", String(normalizeChatId(options.chatId)));
@@ -278,6 +293,23 @@ export class TelegramApi {
 			message_thread_id: normalizeThreadId(options.threadId),
 			text: options.text,
 			parse_mode: options.parseMode,
+			reply_markup: options.replyMarkup,
+		});
+	}
+
+	async editRichMessage(options: {
+		chatId: string;
+		messageId: number;
+		text: string;
+		threadId?: string;
+		replyMarkup?: InlineKeyboardMarkup;
+	}): Promise<SentMessage | true> {
+		const richMessage: InputRichMessage = { markdown: options.text };
+		return this.request<SentMessage | true>("editMessageText", {
+			chat_id: normalizeChatId(options.chatId),
+			message_id: options.messageId,
+			message_thread_id: normalizeThreadId(options.threadId),
+			rich_message: richMessage,
 			reply_markup: options.replyMarkup,
 		});
 	}
