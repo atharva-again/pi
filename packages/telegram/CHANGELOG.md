@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.1.3] - 2026-07-06
+
+### Fixed
+
+- Restored Telegram rich-message rendering for rich Markdown so tables render as native Telegram tables.
+
 ## [0.1.1] - 2026-07-06
 
 ### Fixed
