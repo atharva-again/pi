@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-07-06
+
+### Fixed
+
+- Added npm package homepage, repository, and issue tracker metadata for the scoped `@atharva-again/pi-tg` package.
+
 ## [0.1.0] - 2026-07-05
 
 ### Added
