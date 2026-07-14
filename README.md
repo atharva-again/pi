@@ -23,3 +23,14 @@ See https://github.com/atharva-again/pi/pull/1 for the PR that implemented this.
 ### 2. Bi-directional Thinking Toggle
 
 This was also inspired by Codex. It was implemented in https://github.com/atharva-again/pi/pull/2
+
+### 3. A Telegram Client(ish)
+
+It has all commands that Pi has, even your extensions. You can start a new session directly from the bot, instead of starting it from the terminal and continuing in telegram. See PR #3 to see how it was implemented.
+
+<img width="330" height="806" alt="Screenshot_20260706-013340" src="https://github.com/user-attachments/assets/e31770b9-a9cb-4b37-84ab-2a7f7d844d4a" />
+
+<img width="330" height="806" alt="Screenshot_20260706-013255" src="https://github.com/user-attachments/assets/35096503-3f4e-4720-a543-d09c02840f72" />
+
+<img width="330" height="806" alt="Screenshot_20260706-013330" src="https://github.com/user-attachments/assets/988f7433-1d22-46fb-a732-77ca38bf0a9b" />
+
