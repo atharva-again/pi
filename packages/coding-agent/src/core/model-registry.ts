@@ -6,10 +6,10 @@ import {
 	type AnthropicMessagesCompat,
 	type Api,
 	type AssistantMessageEventStream,
+	type BuiltinProvider,
 	type Context,
 	getModels,
 	getProviders,
-	type KnownProvider,
 	type Model,
 	type OAuthProviderInterface,
 	type OpenAICompletionsCompat,
@@ -29,6 +29,7 @@ import { stripJsonComments } from "../utils/json.ts";
 import { normalizePath } from "../utils/paths.ts";
 import type { AuthStatus, AuthStorage } from "./auth-storage.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "./provider-display-names.ts";
+import { registerCustomRadiusOAuthProvider } from "./radius.ts";
 import {
 	clearConfigValueCache,
 	getConfigValueEnvVarNames,
@@ -94,6 +95,7 @@ const ThinkingLevelMapSchema = Type.Object({
 	medium: Type.Optional(ThinkingLevelMapValueSchema),
 	high: Type.Optional(ThinkingLevelMapValueSchema),
 	xhigh: Type.Optional(ThinkingLevelMapValueSchema),
+	max: Type.Optional(ThinkingLevelMapValueSchema),
 });
 
 const ChatTemplateKwargScalarSchema = Type.Union([Type.String(), Type.Number(), Type.Boolean(), Type.Null()]);
@@ -132,13 +134,20 @@ const OpenAICompletionsCompatSchema = Type.Object({
 	openRouterRouting: Type.Optional(OpenRouterRoutingSchema),
 	vercelGatewayRouting: Type.Optional(VercelGatewayRoutingSchema),
 	supportsStrictMode: Type.Optional(Type.Boolean()),
+	sendSessionAffinityHeaders: Type.Optional(Type.Boolean()),
+	sessionAffinityFormat: Type.Optional(
+		Type.Union([Type.Literal("openai"), Type.Literal("openai-nosession"), Type.Literal("openrouter")]),
+	),
 	supportsLongCacheRetention: Type.Optional(Type.Boolean()),
 });
 
 const OpenAIResponsesCompatSchema = Type.Object({
 	supportsDeveloperRole: Type.Optional(Type.Boolean()),
-	sendSessionIdHeader: Type.Optional(Type.Boolean()),
+	sessionAffinityFormat: Type.Optional(
+		Type.Union([Type.Literal("openai"), Type.Literal("openai-nosession"), Type.Literal("openrouter")]),
+	),
 	supportsLongCacheRetention: Type.Optional(Type.Boolean()),
+	supportsToolSearch: Type.Optional(Type.Boolean()),
 });
 
 const AnthropicMessagesCompatSchema = Type.Object({
@@ -147,6 +156,7 @@ const AnthropicMessagesCompatSchema = Type.Object({
 	sendSessionAffinityHeaders: Type.Optional(Type.Boolean()),
 	supportsCacheControlOnTools: Type.Optional(Type.Boolean()),
 	forceAdaptiveThinking: Type.Optional(Type.Boolean()),
+	supportsToolReferences: Type.Optional(Type.Boolean()),
 });
 
 const ProviderCompatSchema = Type.Union([
@@ -154,6 +164,21 @@ const ProviderCompatSchema = Type.Union([
 	OpenAIResponsesCompatSchema,
 	AnthropicMessagesCompatSchema,
 ]);
+
+const ModelCostRatesSchema = {
+	input: Type.Number(),
+	output: Type.Number(),
+	cacheRead: Type.Number(),
+	cacheWrite: Type.Number(),
+};
+const ModelCostTierSchema = Type.Object({
+	inputTokensAbove: Type.Number(),
+	...ModelCostRatesSchema,
+});
+const ModelCostSchema = Type.Object({
+	...ModelCostRatesSchema,
+	tiers: Type.Optional(Type.Array(ModelCostTierSchema)),
+});
 
 // Schema for custom model definition
 // Most fields are optional with sensible defaults for local models (Ollama, LM Studio, etc.)
@@ -165,14 +190,7 @@ const ModelDefinitionSchema = Type.Object({
 	reasoning: Type.Optional(Type.Boolean()),
 	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
 	input: Type.Optional(Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]))),
-	cost: Type.Optional(
-		Type.Object({
-			input: Type.Number(),
-			output: Type.Number(),
-			cacheRead: Type.Number(),
-			cacheWrite: Type.Number(),
-		}),
-	),
+	cost: Type.Optional(ModelCostSchema),
 	contextWindow: Type.Optional(Type.Number()),
 	maxTokens: Type.Optional(Type.Number()),
 	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
@@ -191,6 +209,7 @@ const ModelOverrideSchema = Type.Object({
 			output: Type.Optional(Type.Number()),
 			cacheRead: Type.Optional(Type.Number()),
 			cacheWrite: Type.Optional(Type.Number()),
+			tiers: Type.Optional(Type.Array(ModelCostTierSchema)),
 		}),
 	),
 	contextWindow: Type.Optional(Type.Number()),
@@ -206,6 +225,9 @@ const ProviderConfigSchema = Type.Object({
 	baseUrl: Type.Optional(Type.String({ minLength: 1 })),
 	apiKey: Type.Optional(Type.String({ minLength: 1 })),
 	api: Type.Optional(Type.String({ minLength: 1 })),
+	/** OAuth flavor spoken by this provider's endpoint. Registers a sign-in
+	 * provider with a dynamic model catalog (e.g. a custom Radius gateway). */
+	oauth: Type.Optional(Type.Literal("radius")),
 	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
 	compat: Type.Optional(ProviderCompatSchema),
 	authHeader: Type.Optional(Type.Boolean()),
@@ -334,6 +356,7 @@ function applyModelOverride(model: Model<Api>, override: ModelOverride): Model<A
 			output: override.cost.output ?? model.cost.output,
 			cacheRead: override.cost.cacheRead ?? model.cost.cacheRead,
 			cacheWrite: override.cost.cacheWrite ?? model.cost.cacheWrite,
+			tiers: override.cost.tiers ?? model.cost.tiers,
 		};
 	}
 
@@ -353,6 +376,7 @@ export class ModelRegistry {
 	private models: Model<Api>[] = [];
 	private providerRequestConfigs: Map<string, ProviderRequestConfig> = new Map();
 	private modelRequestHeaders: Map<string, Record<string, string>> = new Map();
+	private configModelOverrides: Map<string, Map<string, ModelOverride>> = new Map();
 	private registeredProviders: Map<string, ProviderConfigInput> = new Map();
 	private loadError: string | undefined = undefined;
 	readonly authStorage: AuthStorage;
@@ -406,6 +430,7 @@ export class ModelRegistry {
 			modelOverrides,
 			error,
 		} = this.modelsJsonPath ? this.loadCustomModels(this.modelsJsonPath) : emptyCustomModelsResult();
+		this.configModelOverrides = modelOverrides;
 
 		if (error) {
 			this.loadError = error;
@@ -432,7 +457,7 @@ export class ModelRegistry {
 		modelOverrides: Map<string, Map<string, ModelOverride>>,
 	): Model<Api>[] {
 		return getProviders().flatMap((provider) => {
-			const models = getModels(provider as KnownProvider) as Model<Api>[];
+			const models = getModels(provider as BuiltinProvider) as Model<Api>[];
 			const providerOverride = overrides.get(provider);
 			const perModelOverrides = modelOverrides.get(provider);
 
@@ -457,6 +482,15 @@ export class ModelRegistry {
 				return model;
 			});
 		});
+	}
+
+	private getConfiguredModelOverride(providerName: string, modelId: string): ModelOverride | undefined {
+		return this.configModelOverrides.get(providerName)?.get(modelId);
+	}
+
+	private applyConfiguredModelOverride(providerName: string, model: Model<Api>): Model<Api> {
+		const modelOverride = this.getConfiguredModelOverride(providerName, model.id);
+		return modelOverride ? applyModelOverride(model, modelOverride) : model;
 	}
 
 	/** Merge custom models into built-in list by provider+id (custom wins on conflicts). */
@@ -507,6 +541,12 @@ export class ModelRegistry {
 					});
 				}
 
+				if (providerConfig.oauth === "radius") {
+					// Must run before the modifyModels loop in loadModels() so the
+					// credential-cached catalog is injected on this load.
+					registerCustomRadiusOAuthProvider(providerName, providerConfig.name, providerConfig.baseUrl!);
+				}
+
 				this.storeProviderRequestConfig(providerName, providerConfig);
 
 				if (providerConfig.modelOverrides) {
@@ -538,7 +578,11 @@ export class ModelRegistry {
 			const hasModelOverrides =
 				providerConfig.modelOverrides && Object.keys(providerConfig.modelOverrides).length > 0;
 
-			if (models.length === 0) {
+			if (providerConfig.oauth && !providerConfig.baseUrl) {
+				throw new Error(`Provider ${providerName}: "baseUrl" is required when "oauth" is set.`);
+			}
+
+			if (models.length === 0 && !providerConfig.oauth) {
 				// Override-only config: needs baseUrl, headers, compat, modelOverrides, or some combination.
 				if (!providerConfig.baseUrl && !providerConfig.headers && !providerConfig.compat && !hasModelOverrides) {
 					throw new Error(
@@ -584,7 +628,7 @@ export class ModelRegistry {
 		const getBuiltInDefaults = (providerName: string): { api: string; baseUrl: string } | undefined => {
 			if (!builtInProviders.has(providerName)) return undefined;
 			if (builtInDefaultsCache.has(providerName)) return builtInDefaultsCache.get(providerName);
-			const builtIn = getModels(providerName as KnownProvider) as Model<Api>[];
+			const builtIn = getModels(providerName as BuiltinProvider) as Model<Api>[];
 			if (builtIn.length === 0) return undefined;
 			const defaults = { api: builtIn[0].api, baseUrl: builtIn[0].baseUrl };
 			builtInDefaultsCache.set(providerName, defaults);
@@ -921,9 +965,14 @@ export class ModelRegistry {
 			// Parse and add new models
 			for (const modelDef of config.models) {
 				const api = modelDef.api || config.api;
-				this.storeModelHeaders(providerName, modelDef.id, modelDef.headers);
+				const modelOverride = this.getConfiguredModelOverride(providerName, modelDef.id);
+				const headers =
+					modelDef.headers || modelOverride?.headers
+						? { ...modelDef.headers, ...modelOverride?.headers }
+						: undefined;
+				this.storeModelHeaders(providerName, modelDef.id, headers);
 
-				this.models.push({
+				const model = this.applyConfiguredModelOverride(providerName, {
 					id: modelDef.id,
 					name: modelDef.name,
 					api: api as Api,
@@ -938,6 +987,7 @@ export class ModelRegistry {
 					headers: undefined,
 					compat: modelDef.compat,
 				} as Model<Api>);
+				this.models.push(model);
 			}
 
 			// Apply OAuth modifyModels if credentials exist (e.g., to update baseUrl)
@@ -981,7 +1031,7 @@ export interface ProviderConfigInput {
 		reasoning: boolean;
 		thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
 		input: ("text" | "image")[];
-		cost: { input: number; output: number; cacheRead: number; cacheWrite: number };
+		cost: Model<Api>["cost"];
 		contextWindow: number;
 		maxTokens: number;
 		headers?: Record<string, string>;

@@ -20,8 +20,11 @@
 #   4. Add an environment secret `PI_GIST_TOKEN` on `pi-analyze` with gist
 #      creation permission. The analysis job uses it to upload the exported
 #      session gist.
+#   5. Add an environment secret `PI_AUTH_UPDATE_TOKEN` on `pi-analyze` with
+#      permission to update this repo's environment secrets. The analysis job
+#      uses it to write back refreshed `PI_AUTH_JSON` contents.
 #
-# The selected runner must have Node.js support plus fd and ripgrep. GitHub
+# The selected runner must have Node.js support plus gh, fd, and ripgrep. GitHub
 # hosted runners are bootstrapped below; future self-hosted aliases should have
 # those dependencies preinstalled or installable by the setup steps.
 #
@@ -242,6 +245,9 @@ jobs:
     runs-on: ${{ fromJSON(needs.authorize.outputs.runs_on) }}
     environment: pi-analyze
     timeout-minutes: 45
+    concurrency:
+      group: issue-analysis-pi-auth
+      cancel-in-progress: false
     env:
       ISSUE_ANALYSIS_MODEL: openai-codex/gpt-5.5
       ISSUE_ANALYSIS_THINKING: high
@@ -312,6 +318,7 @@ jobs:
         run: npm run build
 
       - name: Write auth.json
+        id: write_auth
         uses: actions/github-script@v7
         env:
           PI_AUTH_JSON: ${{ secrets.PI_AUTH_JSON }}
@@ -394,6 +401,58 @@ jobs:
             if (exitCode !== 0) {
               throw new Error(`pi /is failed with exit code ${exitCode}`);
             }
+
+      - name: Persist refreshed auth.json
+        if: always() && steps.write_auth.outcome == 'success'
+        uses: actions/github-script@v7
+        env:
+          GH_TOKEN: ${{ secrets.PI_AUTH_UPDATE_TOKEN }}
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/pi-agent
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const { spawn } = require('child_process');
+
+            if (!process.env.GH_TOKEN) {
+              throw new Error('PI_AUTH_UPDATE_TOKEN is not configured for the pi-analyze environment');
+            }
+
+            const authPath = path.join(process.env.PI_CODING_AGENT_DIR, 'auth.json');
+            if (!fs.existsSync(authPath)) {
+              core.warning('auth.json was not created; skipping auth persistence');
+              return;
+            }
+
+            const authJson = fs.readFileSync(authPath, 'utf8');
+            let parsed;
+            try {
+              parsed = JSON.parse(authJson);
+            } catch (error) {
+              throw new Error(`Refusing to persist malformed auth.json: ${error instanceof Error ? error.message : String(error)}`);
+            }
+
+            const codexAuth = parsed['openai-codex'];
+            if (codexAuth?.type !== 'oauth' || typeof codexAuth.refresh !== 'string' || codexAuth.refresh.length === 0) {
+              throw new Error('Refusing to persist auth.json without openai-codex OAuth refresh credentials');
+            }
+
+            await new Promise((resolve, reject) => {
+              const child = spawn(
+                'gh',
+                ['secret', 'set', 'PI_AUTH_JSON', '--env', 'pi-analyze', '--repo', process.env.GITHUB_REPOSITORY],
+                { env: process.env, stdio: ['pipe', 'inherit', 'inherit'] },
+              );
+              child.stdin.end(authJson);
+              child.on('error', reject);
+              child.on('close', (code) => {
+                if (code === 0) {
+                  resolve();
+                } else {
+                  reject(new Error(`gh secret set failed with exit code ${code}`));
+                }
+              });
+            });
 
       - name: Export session files
         id: export_session_files

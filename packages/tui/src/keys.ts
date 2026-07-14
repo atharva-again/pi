@@ -1160,7 +1160,7 @@ export function matchesKey(data: string, keyId: KeyId): boolean {
 		}
 
 		if (modifier === MODIFIERS.alt && !_kittyProtocolActive && (isLetter || isDigit || SYMBOL_KEYS.has(key))) {
-			// Legacy: alt+letter/digit/symbol is ESC followed by the key
+			// Legacy: alt+printable key is ESC followed by the key
 			if (data === `\x1b${key}`) return true;
 		}
 
@@ -1293,13 +1293,13 @@ export function parseKey(data: string): string | undefined {
 	if (!_kittyProtocolActive && data === "\x1bF") return "alt+right";
 	if (!_kittyProtocolActive && data.length === 2 && data[0] === "\x1b") {
 		const code = data.charCodeAt(1);
-		const char = String.fromCharCode(code);
 		if (code >= 1 && code <= 26) {
 			return `ctrl+alt+${String.fromCharCode(code + 96)}`;
 		}
 		// Legacy alt+letter/digit/symbol (ESC followed by the key)
-		if ((code >= 97 && code <= 122) || (code >= 48 && code <= 57) || SYMBOL_KEYS.has(char)) {
-			return `alt+${char}`;
+		const key = String.fromCharCode(code);
+		if ((code >= 97 && code <= 122) || (code >= 48 && code <= 57) || SYMBOL_KEYS.has(key)) {
+			return `alt+${key}`;
 		}
 	}
 	if (data === "\x1b[A") return "up";
