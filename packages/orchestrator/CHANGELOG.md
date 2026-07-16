@@ -1,10 +1,12 @@
 # Changelog
 
-## [0.80.9] - 2026-07-16
+## [Unreleased]
 
 ### Added
 
 - Added an exported RPC process helper for embedding Pi headless clients.
+
+## [0.80.9] - 2026-07-16
 
 ## [0.80.8] - 2026-07-16
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Added `Ctrl+P` pin toggling in `/resume`, with pinned sessions stored separately and shown above other sessions.
+
 ## [0.80.9] - 2026-07-16
 
 ### New Features
@@ -23,10 +29,6 @@
 ### Removed
 
 - Removed Grok 3, Grok 3 Fast, Grok 4.20 variants, and Grok Code Fast 1 from the built-in xAI model catalog ([#6734](https://github.com/earendil-works/pi-mono/pull/6734) by [@Jaaneek](https://github.com/Jaaneek)).
-
-### Added
-
-- Added `Ctrl+P` pin toggling in `/resume`, with pinned sessions stored separately and shown above other sessions.
 
 ## [0.80.8] - 2026-07-16
 
