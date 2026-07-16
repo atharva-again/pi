@@ -970,7 +970,8 @@ export function createResumeOpenCodeExtension(overrides: Partial<ResumeOpenCodeD
 						return;
 					}
 					const exported = exportedResult.value;
-					const parsed = parseOpenCodeExport(exported, sessionId, dependencies.now());
+					const importedAtTimestamp = dependencies.now();
+					const parsed = parseOpenCodeExport(exported, sessionId, importedAtTimestamp);
 					if (!isCurrentDirectory(parsed.info.directory, ctx.cwd)) {
 						if (!ctx.hasUI) {
 							throw new Error(
@@ -997,10 +998,8 @@ export function createResumeOpenCodeExtension(overrides: Partial<ResumeOpenCodeD
 					}
 
 					const model = { api: ctx.model.api, provider: ctx.model.provider, id: ctx.model.id };
-					const parentSession = ctx.sessionManager.getSessionFile();
-					const importedAt = new Date(dependencies.now()).toISOString();
+					const importedAt = new Date(importedAtTimestamp).toISOString();
 					const sourceFingerprint = hashText(exported);
-					const sessionName = safeDisplayText(`OpenCode: ${parsed.info.title}`, 120);
 					const omissionCounts = { ...parsed.omitted };
 					if (bounded.contextLimitOmitted > 0) {
 						increment(omissionCounts, "context-limit-message", bounded.contextLimitOmitted);
@@ -1011,10 +1010,10 @@ export function createResumeOpenCodeExtension(overrides: Partial<ResumeOpenCodeD
 					const notification = `Imported ${bounded.messages.length} OpenCode messages from ${sessionId}`;
 
 					const result = await ctx.newSession({
-						parentSession,
 						setup: async (sessionManager) => {
 							const importedEntries: Array<{
 								sourceMessageId: string;
+								sourceTimestamp: number;
 								piEntryId: string;
 								contentHash: string;
 							}> = [];
@@ -1024,7 +1023,7 @@ export function createResumeOpenCodeExtension(overrides: Partial<ResumeOpenCodeD
 										? sessionManager.appendMessage({
 												role: "user",
 												content: [{ type: "text", text: message.text }],
-												timestamp: message.timestamp,
+												timestamp: importedAtTimestamp,
 											})
 										: sessionManager.appendMessage({
 												role: "assistant",
@@ -1034,10 +1033,11 @@ export function createResumeOpenCodeExtension(overrides: Partial<ResumeOpenCodeD
 												model: model.id,
 												usage: emptyUsage(),
 												stopReason: "stop",
-												timestamp: message.timestamp,
+												timestamp: importedAtTimestamp,
 											});
 								importedEntries.push({
 									sourceMessageId: message.sourceMessageId,
+									sourceTimestamp: message.timestamp,
 									piEntryId,
 									contentHash: message.contentHash,
 								});
@@ -1060,7 +1060,6 @@ export function createResumeOpenCodeExtension(overrides: Partial<ResumeOpenCodeD
 								records: parsed.records,
 								importedEntries,
 							});
-							sessionManager.appendSessionInfo(sessionName);
 						},
 						withSession: async (replacementCtx) => {
 							replacementCtx.ui.notify(notification, "info");

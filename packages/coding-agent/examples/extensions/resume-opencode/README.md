@@ -63,7 +63,7 @@ It intentionally omits:
 - Compaction summaries
 - Errored or incomplete assistant responses
 
-The extension records source IDs, content hashes, omission counts, source metadata, and the export fingerprint as a custom Pi entry. This provenance is not sent to the model.
+The extension records source IDs, original timestamps, content hashes, omission counts, source metadata, and the export fingerprint as a custom Pi entry. This provenance is not sent to the model. Native Pi messages use the import time so the new session sorts as recent in `/resume`.
 
 Imported history is limited to half of the active model's context window, capped at 100,000 estimated tokens. Older messages are omitted first. Oversized retained messages are truncated deterministically.
 

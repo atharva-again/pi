@@ -33,6 +33,7 @@ interface CommandHarness {
 	selectItems: string[];
 	customScreens: string[];
 	getReplacement(): SessionManager | undefined;
+	hasParentSessionOption(): boolean;
 }
 
 function exportPayload(directory = CWD): string {
@@ -139,6 +140,7 @@ function createCommandHarness(
 	const selectItems: string[] = [];
 	const customScreens: string[] = [];
 	let replacement: SessionManager | undefined;
+	let parentSessionOption = false;
 	const cwd = options.cwd ?? CWD;
 	const current = SessionManager.inMemory(cwd);
 	const baseModel = getModel("anthropic", "claude-sonnet-4-5");
@@ -216,6 +218,7 @@ function createCommandHarness(
 		model,
 		async waitForIdle() {},
 		async newSession(newSessionOptions?: Parameters<ExtensionCommandContext["newSession"]>[0]) {
+			parentSessionOption = Object.hasOwn(newSessionOptions ?? {}, "parentSession");
 			replacement = SessionManager.inMemory(cwd);
 			if (newSessionOptions?.parentSession) {
 				replacement.newSession({ parentSession: newSessionOptions.parentSession });
@@ -238,6 +241,7 @@ function createCommandHarness(
 		selectItems,
 		customScreens,
 		getReplacement: () => replacement,
+		hasParentSessionOption: () => parentSessionOption,
 	};
 }
 
@@ -280,8 +284,10 @@ describe("resume-opencode", () => {
 			"assistant:Implemented the parser fix.",
 			"user:Now add tests",
 		]);
+		expect(context.messages.map((message) => message.timestamp)).toEqual([NOW, NOW, NOW]);
 		expect(context.model).toEqual({ provider: "anthropic", modelId: "claude-sonnet-4-5" });
-		expect(replacement!.getSessionName()).toBe("OpenCode: Fix parser");
+		expect(replacement!.getSessionName()).toBeUndefined();
+		expect(harness.hasParentSessionOption()).toBe(false);
 
 		const provenance = replacement!
 			.getEntries()
@@ -292,11 +298,11 @@ describe("resume-opencode", () => {
 			nativeSessionId: string;
 			sourceFingerprint: string;
 			omitted: Record<string, number>;
-			importedEntries: unknown[];
+			importedEntries: Array<{ sourceTimestamp: number }>;
 		};
 		expect(data.nativeSessionId).toBe(SESSION_ID);
 		expect(data.sourceFingerprint).toMatch(/^[0-9a-f]{64}$/);
-		expect(data.importedEntries).toHaveLength(3);
+		expect(data.importedEntries.map((entry) => entry.sourceTimestamp)).toEqual([NOW - 4000, NOW - 2500, NOW - 2000]);
 		expect(data.omitted).toMatchObject({
 			"system-prompt": 1,
 			"synthetic-text-part": 1,
