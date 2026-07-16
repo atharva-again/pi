@@ -1,0 +1,43 @@
+{
+  "name": "@atharva-again/pi-resume-codex",
+  "version": "0.1.0",
+  "description": "Pi extension for safely resuming Codex sessions",
+  "author": "Atharva Verma",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atharva-again/pi.git",
+    "directory": "packages/coding-agent/examples/extensions/resume-codex"
+  },
+  "homepage": "https://github.com/atharva-again/pi/tree/main/packages/coding-agent/examples/extensions/resume-codex#readme",
+  "bugs": {
+    "url": "https://github.com/atharva-again/pi/issues"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "codex",
+    "coding-agent"
+  ],
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
