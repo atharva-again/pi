@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setKeybindings } from "@earendil-works/pi-tui";
@@ -97,6 +97,38 @@ describe("session selector pins", () => {
 		expect(pinStore.getPinnedSessionPaths().size).toBe(1);
 		output = stripAnsi(selector.render(120).join("\n"));
 		expect(output.indexOf("Older pinned")).toBeLessThan(output.indexOf("Newer regular"));
+	});
+
+	it("unpins with the retained canonical path after a session symlink disappears", async () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-selector-pin-symlink-"));
+		tempDirs.push(tempDir);
+		const sessionPath = join(tempDir, "session.jsonl");
+		const sessionAliasPath = join(tempDir, "session-alias.jsonl");
+		const pinStorePath = join(tempDir, "session-pins.json");
+		writeSession(sessionPath, "session", tempDir, "2026-01-01T00:00:00.000Z", "Symlinked session");
+		const sessions = await SessionManager.list(tempDir, tempDir);
+		symlinkSync(sessionPath, sessionAliasPath);
+		const pinStore = new SessionPinStore(pinStorePath);
+		pinStore.setPinned(sessionAliasPath, true);
+		const keybindings = new KeybindingsManager();
+		const selector = new SessionSelectorComponent(
+			async () => sessions.map((session) => ({ ...session, path: sessionAliasPath })),
+			async () => [],
+			() => {},
+			() => {},
+			() => {},
+			() => {},
+			{ keybindings, pinStorePath },
+		);
+		await flushPromises();
+		expect(pinStore.getPinnedSessionPaths()).toEqual(new Set([realpathSync(sessionPath)]));
+		rmSync(sessionAliasPath);
+
+		selector.getSessionList().handleInput(CTRL_P);
+
+		expect(pinStore.getPinnedSessionPaths()).toEqual(new Set());
+		const output = stripAnsi(selector.render(120).join("\n"));
+		expect(output).toContain("Session unpinned");
 	});
 
 	it("removes the persisted pin after deleting a pinned session", async () => {

@@ -5,7 +5,7 @@ export type SortMode = "threaded" | "recent" | "relevance";
 
 export type NameFilter = "all" | "named";
 
-export type SessionSelectorSession = SessionInfo & { pinned?: boolean };
+export type SessionSelectorSession = SessionInfo & { pinned?: boolean; pinPath?: string };
 
 export interface ParsedSearchQuery {
 	mode: "tokens" | "regex";

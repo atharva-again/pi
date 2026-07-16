@@ -28,6 +28,16 @@ describe("SessionPinStore", () => {
 		expect(existsSync(agentDir)).toBe(false);
 	});
 
+	it("propagates pin-store read errors other than a missing file", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-pins-read-error-"));
+		tempDirs.push(tempDir);
+		const pinStorePath = join(tempDir, "session-pins.json");
+		mkdirSync(pinStorePath);
+		const pinStore = new SessionPinStore(pinStorePath);
+
+		expect(() => pinStore.getPinnedSessionPaths()).toThrow(`Failed to read session pins ${pinStorePath}`);
+	});
+
 	it("stores pins separately without changing recent-session selection", () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-pins-"));
 		tempDirs.push(tempDir);

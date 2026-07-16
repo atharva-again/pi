@@ -9,14 +9,25 @@ type SessionPinsFile = Record<string, true>;
 const SESSION_PINS_WRITE_OPTIONS = { encoding: "utf-8", mode: 0o600 } as const;
 
 function readSessionPins(path: string): SessionPinsFile {
-	if (!existsSync(path)) return {};
+	let contents: string;
+	try {
+		contents = readFileSync(path, "utf-8");
+	} catch (error) {
+		const code =
+			typeof error === "object" && error !== null && "code" in error
+				? String((error as { code?: unknown }).code)
+				: undefined;
+		if (code === "ENOENT") return {};
+		const message = error instanceof Error ? error.message : String(error);
+		throw new Error(`Failed to read session pins ${path}: ${message}`, { cause: error });
+	}
 
 	let parsed: unknown;
 	try {
-		parsed = JSON.parse(readFileSync(path, "utf-8"));
+		parsed = JSON.parse(contents);
 	} catch (error) {
 		const message = error instanceof Error ? error.message : String(error);
-		throw new Error(`Failed to read session pins ${path}: ${message}`);
+		throw new Error(`Failed to read session pins ${path}: ${message}`, { cause: error });
 	}
 	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
 		throw new Error(`Invalid session pins ${path}: expected an object`);
