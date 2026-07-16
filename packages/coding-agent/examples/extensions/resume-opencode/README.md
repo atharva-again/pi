@@ -1,55 +1,59 @@
 # @atharva-again/pi-resume-opencode
 
-A Pi extension that imports an OpenCode session into a new native Pi session.
+Continue an OpenCode conversation in Pi without copying context by hand.
 
-## Requirements
+`/resume-opencode` imports an OpenCode session as native Pi history while keeping foreign reasoning, tool calls, tool results, attachments, and failed output out of the model context.
 
-- Pi 0.80.7 or newer
-- An installed `opencode` CLI with the `db` and `export` commands
-- An existing OpenCode database
+## Demo
 
-The extension has been tested against OpenCode 1.17.20.
+https://github.com/user-attachments/assets/f226f3ad-459d-4d92-b39d-f97bbd378e8f
+
 
 ## Install
 
-From npm:
-
 ```bash
-pi install npm:@atharva-again/pi-resume-opencode@0.1.0
+pi install npm:@atharva-again/pi-resume-opencode
 ```
 
-For local development:
+Requirements:
 
-```bash
-pi -e ./index.ts
-```
+- Pi 0.80.7 or newer
+- The `opencode` CLI available on `PATH`
+- An existing OpenCode database
 
-Source is maintained in the [`atharva-again/pi`](https://github.com/atharva-again/pi/tree/main/packages/coding-agent/examples/extensions/resume-opencode) monorepo.
+The extension has been tested with OpenCode 1.17.20.
 
-## Usage
+## Use
 
-Open the interactive picker:
+Run the command from the project whose sessions you want to browse:
 
 ```text
 /resume-opencode
 ```
 
-Or import a known full OpenCode session ID:
+The picker starts with OpenCode sessions from Pi's current directory.
+
+- Press Tab to switch between **Current Directory** and **All** sessions.
+- Type to search by title, directory, or session ID.
+- Select a session to import it into a new native Pi session.
+- Press Escape while discovering or exporting to cancel.
+
+If you already know the full OpenCode session ID, skip the picker:
 
 ```text
 /resume-opencode ses_abc123
 ```
 
-Discovery and export show cancellable progress spinners. The searchable picker starts with sessions from Pi's current working directory; press Tab to switch between current-directory and all root, non-archived sessions. It shows each session's title, update time, ID, and directory when viewing all sessions. Importing a session from another directory requires confirmation and keeps Pi's current working directory.
+Importing from another directory requires confirmation. Pi keeps its current working directory rather than switching to the source directory.
 
-## Import policy
+## What gets imported
 
-The extension imports only:
+Only deterministic conversation text is added to Pi's model context:
 
 - Real user text
 - Completed, non-error assistant text
 
-It intentionally omits:
+The following OpenCode data is deliberately excluded:
 
 - Reasoning
 - Tool calls and tool results
@@ -59,27 +63,23 @@ It intentionally omits:
 - Compaction summaries
 - Errored or incomplete assistant responses
 
-The extension records source IDs, original timestamps, content hashes, omission counts, source metadata, and the export fingerprint as a custom Pi entry. This provenance is not sent to the model. Native Pi messages use the import time so the new session sorts as recent in `/resume`.
-
-Imported history is limited to half of the active model's context window, capped at 100,000 estimated tokens. Older messages are omitted first. Oversized retained messages are truncated deterministically.
-
-## Publishing
-
-The package is published under the `@atharva-again` npm scope. Inspect the current published version with:
-
-```bash
-npm view @atharva-again/pi-resume-opencode version
-```
-
-Inspect the package contents, then publish from this directory:
-
-```bash
-npm pack --dry-run
-npm publish --access public
-```
-
-For later releases, update the version and install examples before publishing.
+The result is a Pi session that appears as recent in `/resume` and can be continued with the active Pi model.
 
 ## Security
 
-The extension executes the local `opencode` binary with fixed argument arrays and fixed SQL. It never writes to OpenCode's database. Because OpenCode can truncate large exports written to a pipe, the extension captures export output in an owner-only temporary file, reads it, and deletes it immediately. Exports have no timeout or size cap; Escape still cancels an export in interactive mode. Extensions run with the user's full permissions; review the source before installation.
+The extension uses the installed OpenCode CLI instead of reading or modifying OpenCode's SQLite database directly.
+
+- Discovery uses fixed SQL and fixed command arguments.
+- Exported transcripts are captured in an owner-only temporary file and deleted after reading.
+- Foreign tools and tool results are never recreated as executable Pi history.
+- Exports have no timeout or size cap; interactive exports can still be cancelled with Escape.
+
+## Local development
+
+Load the extension directly from this directory:
+
+```bash
+pi -e ./index.ts
+```
+
+Source is maintained in the [`atharva-again/pi`](https://github.com/atharva-again/pi/tree/main/packages/coding-agent/examples/extensions/resume-opencode) monorepo.
