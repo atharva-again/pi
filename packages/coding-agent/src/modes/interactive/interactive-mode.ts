@@ -4818,6 +4818,7 @@ export class InteractiveMode {
 					},
 					showRenameHint: true,
 					keybindings: this.keybindings,
+					pinStorePath: path.join(this.runtimeHost.services.agentDir, "session-pins.json"),
 				},
 
 				this.sessionManager.getSessionFile(),

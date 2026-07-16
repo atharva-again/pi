@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Ctrl+P` pin toggling in `/resume`, with pinned sessions stored separately and shown above other sessions.
+
 ## [0.80.7] - 2026-07-14
 
 ### Breaking Changes
