@@ -7,9 +7,9 @@ import { getModel } from "@earendil-works/pi-ai/compat";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AgentSession } from "../src/core/agent-session.ts";
 import { AuthStorage } from "../src/core/auth-storage.ts";
-import { ModelRegistry } from "../src/core/model-registry.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
+import { createModelRegistry, getModelRuntime } from "./model-runtime-test-utils.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
 function assistantMessage(
@@ -29,7 +29,7 @@ describe("AgentSession work duration entries", () => {
 	let sessionManager: SessionManager;
 	let tempDir: string;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		tempDir = join(tmpdir(), `pi-work-duration-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		mkdirSync(tempDir, { recursive: true });
 		vi.useFakeTimers();
@@ -46,15 +46,15 @@ describe("AgentSession work duration entries", () => {
 		sessionManager = SessionManager.inMemory();
 		const settingsManager = SettingsManager.create(tempDir, tempDir);
 		const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		const modelRegistry = ModelRegistry.create(authStorage, tempDir);
+		await authStorage.modify("anthropic", async () => ({ type: "api_key", key: "test-key" }));
+		const modelRegistry = await createModelRegistry(authStorage, tempDir);
 
 		session = new AgentSession({
 			agent,
 			sessionManager,
 			settingsManager,
 			cwd: tempDir,
-			modelRegistry,
+			modelRuntime: getModelRuntime(modelRegistry),
 			resourceLoader: createTestResourceLoader(),
 		});
 	});

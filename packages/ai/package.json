@@ -1,6 +1,6 @@
 {
 	"name": "@earendil-works/pi-ai",
-	"version": "0.80.7",
+	"version": "0.80.8",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -34,6 +34,10 @@
 		"./bedrock-provider": {
 			"types": "./dist/bedrock-provider.d.ts",
 			"import": "./dist/bedrock-provider.js"
+		},
+		"./bun-oauth": {
+			"types": "./dist/bun-oauth.d.ts",
+			"import": "./dist/bun-oauth.js"
 		}
 	},
 	"bin": {
@@ -46,6 +50,7 @@
 	"scripts": {
 		"clean": "shx rm -rf dist",
 		"generate-models": "node scripts/generate-models.ts",
+		"generate-model-catalog": "node scripts/generate-models.ts --strict --json-only --json-output ../../.artifacts/model-catalog",
 		"generate-image-models": "node scripts/generate-image-models.ts",
 		"build": "npm run generate-models && npm run generate-image-models && tsgo -p tsconfig.build.json",
 		"test": "vitest --run",
