@@ -1,6 +1,6 @@
 import type { Model } from "@earendil-works/pi-ai";
 import { describe, expect, it } from "vitest";
-import { supportedThinkingLevels } from "../src/bot.ts";
+import { formatThinkingLevelConfirmation, supportedThinkingLevels } from "../src/bot.ts";
 
 function reasoningModel(
 	thinkingLevelMap?: Model<"openai-completions">["thinkingLevelMap"],
@@ -31,5 +31,10 @@ describe("Telegram thinking levels", () => {
 			"high",
 			"max",
 		]);
+	});
+
+	it("reports the effective level when coding-agent clamps a direct request", () => {
+		expect(formatThinkingLevelConfirmation("max", { thinkingLevel: "high" })).toBe("Thinking level set to high");
+		expect(formatThinkingLevelConfirmation("max", undefined)).toBe("Thinking level set to max");
 	});
 });
