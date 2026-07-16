@@ -4,6 +4,10 @@ Continue a Codex conversation in Pi without copying context by hand.
 
 `/resume-codex` imports a local Codex CLI, desktop, or IDE session as native Pi history while keeping foreign reasoning, tool activity, attachments, and unfinished output out of the model context.
 
+## Demo
+
+<img width="723" height="455" alt="pi-codex-resume" src="https://github.com/user-attachments/assets/138e6911-4204-4b0b-a78f-d7efc6ef9668" />
+
 ## Install
 
 ```bash
