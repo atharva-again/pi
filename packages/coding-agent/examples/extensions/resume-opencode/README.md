@@ -6,8 +6,7 @@ Continue an OpenCode conversation in Pi without copying context by hand.
 
 ## Demo
 
-https://github.com/user-attachments/assets/f226f3ad-459d-4d92-b39d-f97bbd378e8f
-
+<img width="726" height="404" alt="pi-resume-opencode" src="https://github.com/user-attachments/assets/a980635a-ca48-4ade-8673-0aa87008be6c" />
 
 ## Install
 
