@@ -467,7 +467,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			// =================================================================
 
 			case "set_model": {
-				const models = await session.modelRegistry.getAvailable();
+				const models = await session.modelRuntime.getAvailable();
 				const model = models.find((m) => m.provider === command.provider && m.id === command.modelId);
 				if (!model) {
 					return error(id, "set_model", `Model not found: ${command.provider}/${command.modelId}`);
@@ -485,7 +485,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 
 			case "get_available_models": {
-				const models = await session.modelRegistry.getAvailable();
+				const models = await session.modelRuntime.getAvailable();
 				return success(id, "get_available_models", { models });
 			}
 
@@ -498,7 +498,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 					session.setScopedModels([]);
 					return success(id, "set_scoped_models", { scopedModels: [], diagnostics: [] });
 				}
-				const result = await resolveModelScopeWithDiagnostics(command.patterns, session.modelRegistry);
+				const result = await resolveModelScopeWithDiagnostics(command.patterns, session.modelRuntime);
 				session.setScopedModels(
 					result.scopedModels.map((scoped) => ({
 						model: scoped.model,
