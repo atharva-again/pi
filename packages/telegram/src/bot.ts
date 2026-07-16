@@ -5,6 +5,7 @@ import { writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
 import type {
 	AgentSessionEvent,
 	RpcCommand,
@@ -275,7 +276,7 @@ function isCommandResponse<T extends RpcResponse["command"]>(
 	return response.success === true && response.command === command;
 }
 
-const THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+const THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 function isThinkingLevel(value: string): value is ThinkingLevel {
 	return THINKING_LEVELS.includes(value as ThinkingLevel);
@@ -290,11 +291,14 @@ function modelButtonLabel(model: AvailableModel, selected: boolean): string {
 	return truncateTelegramButtonText(`${prefix}${model.name || model.id}`, 46);
 }
 
-function supportedThinkingLevels(model: AvailableModel | undefined): ThinkingLevel[] {
-	if (!model?.reasoning) {
-		return ["off"];
-	}
-	return THINKING_LEVELS.filter((level) => model.thinkingLevelMap?.[level] !== null);
+export function supportedThinkingLevels(model: AvailableModel | undefined): ThinkingLevel[] {
+	return model ? getSupportedThinkingLevels(model) : ["off"];
+}
+
+export function formatThinkingLevelConfirmation(state: Pick<RpcSessionState, "thinkingLevel"> | undefined): string {
+	return state
+		? `Thinking level set to ${state.thinkingLevel}`
+		: "Thinking level updated, but current state is unavailable.";
 }
 
 function parseModelArgs(args: string): { modelRef: string; thinkingLevel?: ThinkingLevel } | undefined {
@@ -1528,13 +1532,15 @@ export class TelegramPiBot {
 						? "Model and thinking level updated."
 						: source === "scoped"
 							? "Current model updated."
-							: `Thinking level set to ${level}`,
+							: formatThinkingLevelConfirmation(state),
 					"",
 					formatCurrentModelTable(state),
 				]
 					.filter((line): line is string => line !== undefined)
 					.join("\n")
-			: [prefix, `Thinking level set to ${level}`].filter((line): line is string => line !== undefined).join("\n");
+			: [prefix, formatThinkingLevelConfirmation(state)]
+					.filter((line): line is string => line !== undefined)
+					.join("\n");
 		if (message) {
 			await this.sendOrEditMenu(conversation, message, text, { inline_keyboard: [] });
 			return;

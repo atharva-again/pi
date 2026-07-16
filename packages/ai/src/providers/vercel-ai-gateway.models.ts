@@ -1905,7 +1905,7 @@ export const VERCEL_AI_GATEWAY_MODELS = {
 			cacheWrite: 0,
 		},
 		contextWindow: 1000000,
-		maxTokens: 256000,
+		maxTokens: 131072,
 	} satisfies Model<"anthropic-messages">,
 	"nvidia/nemotron-3-nano-30b-a3b": {
 		id: "nvidia/nemotron-3-nano-30b-a3b",

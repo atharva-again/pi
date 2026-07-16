@@ -234,6 +234,8 @@ const KIMI_K3_THINKING_LEVEL_MAP = {
 	xhigh: null,
 	max: "max",
 } as const;
+const KIMI_K3_MAX_TOKENS = 131072;
+const OPENROUTER_KIMI_K3_MODEL_IDS = new Set(["moonshotai/kimi-k3", "~moonshotai/kimi-latest"]);
 
 const ANT_LING_RING_THINKING_LEVEL_MAP = {
 	off: null,
@@ -1824,6 +1826,13 @@ async function generateModels() {
 		// the actual max output is 128000. Also propagates to the derived Azure clone.
 		if (candidate.provider === "openai" && candidate.id === "gpt-5-pro") {
 			candidate.maxTokens = 128000;
+		}
+		// Keep Kimi K3's canonical output limit when gateway metadata is missing or incorrect.
+		if (
+			(candidate.provider === "openrouter" && OPENROUTER_KIMI_K3_MODEL_IDS.has(candidate.id)) ||
+			(candidate.provider === "vercel-ai-gateway" && candidate.id === "moonshotai/kimi-k3")
+		) {
+			candidate.maxTokens = KIMI_K3_MAX_TOKENS;
 		}
 		// Keep selected OpenRouter model metadata stable until upstream settles.
 		if (candidate.provider === "openrouter" && candidate.id === "moonshotai/kimi-k2.5") {
