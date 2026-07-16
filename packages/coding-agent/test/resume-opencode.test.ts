@@ -6,7 +6,6 @@ import { getModel } from "@earendil-works/pi-ai/compat";
 import { type Component, getKeybindings } from "@earendil-works/pi-tui";
 import { describe, expect, it } from "vitest";
 import {
-	boundImportedMessages,
 	createResumeOpenCodeExtension,
 	parseOpenCodeExport,
 	parseOpenCodeSessionList,
@@ -295,11 +294,13 @@ describe("resume-opencode", () => {
 		expect(provenance?.type).toBe("custom");
 		if (!provenance || provenance.type !== "custom") throw new Error("missing provenance entry");
 		const data = provenance.data as {
+			version: number;
 			nativeSessionId: string;
 			sourceFingerprint: string;
 			omitted: Record<string, number>;
 			importedEntries: Array<{ sourceTimestamp: number }>;
 		};
+		expect(data.version).toBe(2);
 		expect(data.nativeSessionId).toBe(SESSION_ID);
 		expect(data.sourceFingerprint).toMatch(/^[0-9a-f]{64}$/);
 		expect(data.importedEntries.map((entry) => entry.sourceTimestamp)).toEqual([NOW - 4000, NOW - 2500, NOW - 2000]);
@@ -496,34 +497,42 @@ describe("resume-opencode", () => {
 		});
 	});
 
-	it("bounds imported context and records message truncation", () => {
-		const longText = "x".repeat(8000);
-		const parsed = parseOpenCodeExport(
-			JSON.stringify({
-				info: { id: SESSION_ID, title: "Large", directory: CWD, time: {} },
-				messages: [
-					{
-						info: { id: "user", role: "user", time: { created: NOW } },
-						parts: [{ id: "user-part", type: "text", text: longText }],
-					},
-					{
-						info: { id: "assistant", role: "assistant", finish: "stop", time: { completed: NOW } },
-						parts: [{ id: "assistant-part", type: "text", text: longText }],
-					},
-				],
-			}),
-			SESSION_ID,
-			NOW,
-		);
+	it("imports full message text and leaves context compaction to Pi", async () => {
+		const longUserText = "u".repeat(8000);
+		const longAssistantText = "a".repeat(8000);
+		const command = await loadCommand(async (args) => {
+			if (args[0] === "db") return { stdout: `${DATABASE_PATH}\n`, stderr: "" };
+			return {
+				stdout: JSON.stringify({
+					info: { id: SESSION_ID, title: "Large", directory: CWD, time: {} },
+					messages: [
+						{
+							info: { id: "user", role: "user", time: { created: NOW } },
+							parts: [{ id: "user-part", type: "text", text: longUserText }],
+						},
+						{
+							info: { id: "assistant", role: "assistant", finish: "stop", time: { completed: NOW } },
+							parts: [{ id: "assistant-part", type: "text", text: longAssistantText }],
+						},
+					],
+				}),
+				stderr: "",
+			};
+		});
+		const harness = createCommandHarness({ modelContextWindow: 512 });
 
-		const bounded = boundImportedMessages(parsed.messages, 1000);
+		await runCommand(command, SESSION_ID, harness);
 
-		expect(bounded.messages).toHaveLength(2);
-		expect(bounded.truncatedMessages).toBe(2);
-		expect(bounded.truncatedCharacters).toBeGreaterThan(0);
-		expect(
-			bounded.messages.every((message) => message.text.includes("[OpenCode message truncated during import]")),
-		).toBe(true);
+		const context = harness.getReplacement()?.buildSessionContext();
+		expect(context?.messages.map(messageText)).toEqual([longUserText, longAssistantText]);
+		const provenance = harness
+			.getReplacement()
+			?.getEntries()
+			.find((entry) => entry.type === "custom" && entry.customType === "resume-opencode");
+		if (!provenance || provenance.type !== "custom") throw new Error("missing provenance entry");
+		const data = provenance.data as { omitted: Record<string, number> };
+		expect(data.omitted).not.toHaveProperty("context-limit-message");
+		expect(data.omitted).not.toHaveProperty("truncated-message");
 	});
 
 	it("validates list and export payloads", () => {
