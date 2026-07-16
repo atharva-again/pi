@@ -46,10 +46,10 @@
 		"node": ">=22.19.0"
 	},
 	"dependencies": {
-		"@earendil-works/pi-agent-core": "0.80.3",
-		"@earendil-works/pi-ai": "0.80.3",
-		"@earendil-works/pi-coding-agent": "https://registry.npmjs.org/@atharva-again/pi-coding-agent/-/pi-coding-agent-0.80.3-pi-tg.1.tgz",
-		"@earendil-works/pi-tui": "0.80.3"
+		"@earendil-works/pi-agent-core": "https://registry.npmjs.org/@earendil-works/pi-agent-core/-/pi-agent-core-0.80.8.tgz",
+		"@earendil-works/pi-ai": "https://registry.npmjs.org/@earendil-works/pi-ai/-/pi-ai-0.80.8.tgz",
+		"@earendil-works/pi-coding-agent": "https://registry.npmjs.org/@atharva-again/pi-coding-agent/-/pi-coding-agent-0.80.8-pi-tg.0.tgz",
+		"@earendil-works/pi-tui": "https://registry.npmjs.org/@earendil-works/pi-tui/-/pi-tui-0.80.8.tgz"
 	},
 	"devDependencies": {
 		"shx": "0.4.0",

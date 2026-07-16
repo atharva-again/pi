@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Updated Pi runtime dependencies to 0.80.8 using the refreshed Telegram RPC support fork.
+
 ## [0.1.3] - 2026-07-06
 
 ### Fixed
