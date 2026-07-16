@@ -1,0 +1,34 @@
+{
+  "name": "pi-resume-opencode",
+  "version": "0.1.0",
+  "description": "Pi extension for safely resuming OpenCode sessions",
+  "author": "Atharva Verma",
+  "type": "module",
+  "license": "MIT",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "opencode",
+    "coding-agent"
+  ],
+  "files": [
+    "index.ts",
+    "README.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}
