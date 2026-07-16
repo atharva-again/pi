@@ -24,7 +24,6 @@ const SESSION_LIST_MAX_BYTES = 2 * 1024 * 1024;
 const STDERR_MAX_BYTES = 64 * 1024;
 const MAX_EXPORTED_MESSAGES = 10_000;
 const MAX_EXPORTED_PARTS = 100_000;
-const MAX_IMPORT_TOKENS = 100_000;
 
 interface OpenCodeCommandOptions {
 	cwd: string;
@@ -77,13 +76,6 @@ interface ParsedOpenCodeExport {
 	messages: ImportedMessage[];
 	records: SourceRecord[];
 	omitted: Record<string, number>;
-}
-
-interface BoundedImport {
-	messages: ImportedMessage[];
-	contextLimitOmitted: number;
-	truncatedCharacters: number;
-	truncatedMessages: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -538,94 +530,6 @@ export function parseOpenCodeExport(
 	};
 }
 
-function messageTokens(message: ImportedMessage): number {
-	return Math.max(1, Math.ceil(message.text.length / 4));
-}
-
-function truncateMessage(message: ImportedMessage, maxTokens: number): { message: ImportedMessage; omitted: number } {
-	const maxCharacters = Math.max(1, maxTokens * 4);
-	if (message.text.length <= maxCharacters) return { message, omitted: 0 };
-	const marker = "\n\n[OpenCode message truncated during import]\n\n";
-	if (maxCharacters <= marker.length + 2) {
-		const text = message.text.slice(0, maxCharacters);
-		return {
-			message: { ...message, text, contentHash: hashText(text) },
-			omitted: message.text.length - text.length,
-		};
-	}
-	const available = maxCharacters - marker.length;
-	const headLength = Math.ceil(available / 2);
-	const tailLength = Math.floor(available / 2);
-	const text = `${message.text.slice(0, headLength)}${marker}${message.text.slice(-tailLength)}`;
-	return {
-		message: { ...message, text, contentHash: hashText(text) },
-		omitted: message.text.length - headLength - tailLength,
-	};
-}
-
-export function boundImportedMessages(messages: ImportedMessage[], tokenBudget: number): BoundedImport {
-	if (messages.length === 0) {
-		return { messages: [], contextLimitOmitted: 0, truncatedCharacters: 0, truncatedMessages: 0 };
-	}
-
-	const perMessageBudget = Math.max(256, Math.floor(tokenBudget / 2));
-	let truncatedCharacters = 0;
-	let truncatedMessages = 0;
-	const bounded = messages.map((message) => {
-		const result = truncateMessage(message, perMessageBudget);
-		if (result.omitted > 0) {
-			truncatedCharacters += result.omitted;
-			truncatedMessages++;
-		}
-		return result.message;
-	});
-
-	let totalTokens = bounded.reduce((total, message) => total + messageTokens(message), 0);
-	let start = 0;
-	while (start < bounded.length && totalTokens > tokenBudget) {
-		totalTokens -= messageTokens(bounded[start]);
-		start++;
-	}
-	while (start < bounded.length && bounded[start].role !== "user") {
-		start++;
-	}
-
-	let selected = bounded.slice(start);
-	if (selected.length === 0) {
-		let latestUserIndex = -1;
-		for (let index = bounded.length - 1; index >= 0; index--) {
-			if (bounded[index].role === "user") {
-				latestUserIndex = index;
-				break;
-			}
-		}
-		if (latestUserIndex < 0) {
-			return {
-				messages: [],
-				contextLimitOmitted: bounded.length,
-				truncatedCharacters,
-				truncatedMessages,
-			};
-		}
-		selected = [];
-		let remaining = tokenBudget;
-		for (let index = latestUserIndex; index < bounded.length; index++) {
-			const message = bounded[index];
-			const tokens = messageTokens(message);
-			if (tokens > remaining) break;
-			selected.push(message);
-			remaining -= tokens;
-		}
-	}
-
-	return {
-		messages: selected,
-		contextLimitOmitted: messages.length - selected.length,
-		truncatedCharacters,
-		truncatedMessages,
-	};
-}
-
 function canonicalizeDirectory(directory: string): string {
 	const resolved = resolve(directory);
 	try {
@@ -988,26 +892,14 @@ export function createResumeOpenCodeExtension(overrides: Partial<ResumeOpenCodeD
 						}
 					}
 
-					const tokenBudget = Math.min(
-						MAX_IMPORT_TOKENS,
-						Math.max(512, Math.floor(ctx.model.contextWindow * 0.5)),
-					);
-					const bounded = boundImportedMessages(parsed.messages, tokenBudget);
-					if (bounded.messages.length === 0 || !bounded.messages.some((message) => message.role === "user")) {
+					if (parsed.messages.length === 0 || !parsed.messages.some((message) => message.role === "user")) {
 						throw new Error("OpenCode session has no importable user text");
 					}
 
 					const model = { api: ctx.model.api, provider: ctx.model.provider, id: ctx.model.id };
 					const importedAt = new Date(importedAtTimestamp).toISOString();
 					const sourceFingerprint = hashText(exported);
-					const omissionCounts = { ...parsed.omitted };
-					if (bounded.contextLimitOmitted > 0) {
-						increment(omissionCounts, "context-limit-message", bounded.contextLimitOmitted);
-					}
-					if (bounded.truncatedMessages > 0) {
-						increment(omissionCounts, "truncated-message", bounded.truncatedMessages);
-					}
-					const notification = `Imported ${bounded.messages.length} OpenCode messages from ${sessionId}`;
+					const notification = `Imported ${parsed.messages.length} OpenCode messages from ${sessionId}`;
 
 					const result = await ctx.newSession({
 						setup: async (sessionManager) => {
@@ -1017,7 +909,7 @@ export function createResumeOpenCodeExtension(overrides: Partial<ResumeOpenCodeD
 								piEntryId: string;
 								contentHash: string;
 							}> = [];
-							for (const message of bounded.messages) {
+							for (const message of parsed.messages) {
 								const piEntryId =
 									message.role === "user"
 										? sessionManager.appendMessage({
@@ -1044,7 +936,7 @@ export function createResumeOpenCodeExtension(overrides: Partial<ResumeOpenCodeD
 							}
 							sessionManager.appendModelChange(model.provider, model.id);
 							sessionManager.appendCustomEntry("resume-opencode", {
-								version: 1,
+								version: 2,
 								source: "opencode",
 								nativeSessionId: parsed.info.id,
 								sourceVersion: parsed.info.version,
@@ -1054,9 +946,7 @@ export function createResumeOpenCodeExtension(overrides: Partial<ResumeOpenCodeD
 								updated: parsed.info.updated,
 								importedAt,
 								sourceFingerprint,
-								tokenBudget,
-								truncatedCharacters: bounded.truncatedCharacters,
-								omitted: omissionCounts,
+								omitted: parsed.omitted,
 								records: parsed.records,
 								importedEntries,
 							});
