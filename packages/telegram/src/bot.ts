@@ -295,11 +295,10 @@ export function supportedThinkingLevels(model: AvailableModel | undefined): Thin
 	return model ? getSupportedThinkingLevels(model) : ["off"];
 }
 
-export function formatThinkingLevelConfirmation(
-	requestedLevel: ThinkingLevel,
-	state: Pick<RpcSessionState, "thinkingLevel"> | undefined,
-): string {
-	return `Thinking level set to ${state?.thinkingLevel ?? requestedLevel}`;
+export function formatThinkingLevelConfirmation(state: Pick<RpcSessionState, "thinkingLevel"> | undefined): string {
+	return state
+		? `Thinking level set to ${state.thinkingLevel}`
+		: "Thinking level updated, but current state is unavailable.";
 }
 
 function parseModelArgs(args: string): { modelRef: string; thinkingLevel?: ThinkingLevel } | undefined {
@@ -1533,13 +1532,13 @@ export class TelegramPiBot {
 						? "Model and thinking level updated."
 						: source === "scoped"
 							? "Current model updated."
-							: formatThinkingLevelConfirmation(level, state),
+							: formatThinkingLevelConfirmation(state),
 					"",
 					formatCurrentModelTable(state),
 				]
 					.filter((line): line is string => line !== undefined)
 					.join("\n")
-			: [prefix, formatThinkingLevelConfirmation(level, state)]
+			: [prefix, formatThinkingLevelConfirmation(state)]
 					.filter((line): line is string => line !== undefined)
 					.join("\n");
 		if (message) {

@@ -33,8 +33,10 @@ describe("Telegram thinking levels", () => {
 		]);
 	});
 
-	it("reports the effective level when coding-agent clamps a direct request", () => {
-		expect(formatThinkingLevelConfirmation("max", { thinkingLevel: "high" })).toBe("Thinking level set to high");
-		expect(formatThinkingLevelConfirmation("max", undefined)).toBe("Thinking level set to max");
+	it("reports the effective level without guessing when state is unavailable", () => {
+		expect(formatThinkingLevelConfirmation({ thinkingLevel: "high" })).toBe("Thinking level set to high");
+		expect(formatThinkingLevelConfirmation(undefined)).toBe(
+			"Thinking level updated, but current state is unavailable.",
+		);
 	});
 });
