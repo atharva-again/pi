@@ -47,4 +47,8 @@ Just wanted to be import opencode sessions directly in pi so I can continue ther
 
 <img width="726" height="404" alt="pi-resume-opencode" src="https://github.com/user-attachments/assets/1a400e1f-4317-4987-902b-c0a131b8efe6" />
 
+### 6. Resume Codex Sessions in Pi
 
+As you can see, the first two features are implemented were inspired by Codex CLI, so it only makes sense to add support for it here. This was implemented via PR https://github.com/atharva-again/pi/pull/12. You can watch the demo below. Detailed README for the extension can be found [here](https://github.com/atharva-again/pi/blob/main/packages/coding-agent/examples/extensions/resume-codex/README.md).
+
+<img width="723" height="455" alt="pi-codex-resume" src="https://github.com/user-attachments/assets/4b4778bc-871c-4a54-b52f-7f5a21ab5d86" />
