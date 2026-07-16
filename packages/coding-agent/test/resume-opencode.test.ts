@@ -454,7 +454,7 @@ describe("resume-opencode", () => {
 		}
 	});
 
-	it("propagates command failures when dialog UI is unavailable", async () => {
+	it("propagates command failures without changing the host process exit code", async () => {
 		const command = await loadCommand(async () => ({ stdout: `${DATABASE_PATH}\n`, stderr: "" }), false);
 		const harness = createCommandHarness({ mode: "print", hasUI: false });
 		const previousExitCode = process.exitCode;
@@ -464,7 +464,7 @@ describe("resume-opencode", () => {
 			await expect(runCommand(command, SESSION_ID, harness)).rejects.toThrow(
 				`OpenCode database not found at ${DATABASE_PATH}`,
 			);
-			expect(process.exitCode).toBe(1);
+			expect(process.exitCode).toBe(previousExitCode);
 			expect(harness.notifications).toEqual([]);
 			expect(harness.getReplacement()).toBeUndefined();
 		} finally {

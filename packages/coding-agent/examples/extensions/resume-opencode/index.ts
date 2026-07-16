@@ -1071,7 +1071,6 @@ export function createResumeOpenCodeExtension(overrides: Partial<ResumeOpenCodeD
 					}
 				} catch (error) {
 					if (!ctx.hasUI) {
-						process.exitCode = 1;
 						throw error instanceof Error ? error : new Error(String(error));
 					}
 					ctx.ui.notify(`resume-opencode: ${error instanceof Error ? error.message : String(error)}`, "error");
