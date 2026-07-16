@@ -15,11 +15,18 @@ import {
 } from "@earendil-works/pi-tui";
 import { KeybindingsManager } from "../../../core/keybindings.ts";
 import type { SessionInfo, SessionListProgress } from "../../../core/session-manager.ts";
+import { SessionPinStore } from "../../../core/session-pin-store.ts";
 import { canonicalizePath as _canonicalizePath } from "../../../utils/paths.ts";
 import { theme } from "../theme/theme.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { keyHint, keyText } from "./keybinding-hints.ts";
-import { filterAndSortSessions, hasSessionName, type NameFilter, type SortMode } from "./session-selector-search.ts";
+import {
+	filterAndSortSessions,
+	hasSessionName,
+	type NameFilter,
+	type SessionSelectorSession,
+	type SortMode,
+} from "./session-selector-search.ts";
 
 type SessionScope = "current" | "all";
 
@@ -60,7 +67,6 @@ class SessionSelectorHeader implements Component {
 	private requestRender: () => void;
 	private loading = false;
 	private loadProgress: { loaded: number; total: number } | null = null;
-	private showPath = false;
 	private confirmingDeletePath: string | null = null;
 	private statusMessage: { type: "info" | "error"; message: string } | null = null;
 	private statusTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -93,10 +99,6 @@ class SessionSelectorHeader implements Component {
 
 	setProgress(loaded: number, total: number): void {
 		this.loadProgress = { loaded, total };
-	}
-
-	setShowPath(showPath: boolean): void {
-		this.showPath = showPath;
 	}
 
 	setShowRenameHint(show: boolean): void {
@@ -164,15 +166,14 @@ class SessionSelectorHeader implements Component {
 			hintLine1 = theme.fg(color, truncateToWidth(this.statusMessage.message, width, "…"));
 			hintLine2 = "";
 		} else {
-			const pathState = this.showPath ? "(on)" : "(off)";
 			const sep = theme.fg("muted", " · ");
 			const hint1 =
 				keyHint("tui.input.tab", "scope") + sep + theme.fg("muted", 're:<pattern> regex · "phrase" exact');
 			const hint2Parts = [
 				keyHint("app.session.toggleSort", "sort"),
 				keyHint("app.session.toggleNamedFilter", "named"),
+				keyHint("app.session.togglePin", "pin"),
 				keyHint("app.session.delete", "delete"),
-				keyHint("app.session.togglePath", `path ${pathState}`),
 			];
 			if (this.showRenameHint) {
 				hint2Parts.push(keyHint("app.session.rename", "rename"));
@@ -188,14 +189,15 @@ class SessionSelectorHeader implements Component {
 
 /** A session tree node for hierarchical display */
 interface SessionTreeNode {
-	session: SessionInfo;
+	session: SessionSelectorSession;
 	children: SessionTreeNode[];
 	latestActivity: number;
+	hasPinned: boolean;
 }
 
 /** Flattened node for display with tree structure info */
 interface FlatSessionNode {
-	session: SessionInfo;
+	session: SessionSelectorSession;
 	depth: number;
 	isLast: boolean;
 	/** For each ancestor level, whether there are more siblings after it */
@@ -206,12 +208,17 @@ interface FlatSessionNode {
  * Build a tree structure from sessions based on parentSessionPath.
  * Returns root nodes sorted by modified date (descending).
  */
-function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
+function buildSessionTree(sessions: SessionSelectorSession[]): SessionTreeNode[] {
 	const byPath = new Map<string, SessionTreeNode>();
 
 	for (const session of sessions) {
 		const sessionPath = canonicalizePath(session.path) ?? session.path;
-		byPath.set(sessionPath, { session, children: [], latestActivity: session.modified.getTime() });
+		byPath.set(sessionPath, {
+			session,
+			children: [],
+			latestActivity: session.modified.getTime(),
+			hasPinned: Boolean(session.pinned),
+		});
 	}
 
 	const roots: SessionTreeNode[] = [];
@@ -228,22 +235,28 @@ function buildSessionTree(sessions: SessionInfo[]): SessionTreeNode[] {
 		}
 	}
 
-	const updateLatestActivity = (node: SessionTreeNode): number => {
+	const updateSubtreeMetadata = (node: SessionTreeNode): number => {
 		let latestActivity = node.session.modified.getTime();
+		let hasPinned = Boolean(node.session.pinned);
 		for (const child of node.children) {
-			latestActivity = Math.max(latestActivity, updateLatestActivity(child));
+			latestActivity = Math.max(latestActivity, updateSubtreeMetadata(child));
+			hasPinned = hasPinned || child.hasPinned;
 		}
 		node.latestActivity = latestActivity;
+		node.hasPinned = hasPinned;
 		return latestActivity;
 	};
 
 	for (const root of roots) {
-		updateLatestActivity(root);
+		updateSubtreeMetadata(root);
 	}
 
-	// Sort children and roots by latest activity in each subtree (descending)
+	// Pin selected subtrees, then sort by latest activity in each subtree (descending)
 	const sortNodes = (nodes: SessionTreeNode[]): void => {
-		nodes.sort((a, b) => b.latestActivity - a.latestActivity);
+		nodes.sort((a, b) => {
+			if (a.hasPinned !== b.hasPinned) return a.hasPinned ? -1 : 1;
+			return b.latestActivity - a.latestActivity;
+		});
 		for (const node of nodes) {
 			sortNodes(node.children);
 		}
@@ -285,7 +298,7 @@ class SessionList implements Component, Focusable {
 		const selected = this.filteredSessions[this.selectedIndex];
 		return selected?.session.path;
 	}
-	private allSessions: SessionInfo[] = [];
+	private allSessions: SessionSelectorSession[] = [];
 	private filteredSessions: FlatSessionNode[] = [];
 	private selectedIndex: number = 0;
 	private searchInput: Input;
@@ -293,7 +306,6 @@ class SessionList implements Component, Focusable {
 	private sortMode: SortMode = "threaded";
 	private nameFilter: NameFilter = "all";
 	private keybindings: KeybindingsManager;
-	private showPath = false;
 	private confirmingDeletePath: string | null = null;
 	private currentSessionCanonicalPath?: string;
 	public onSelect?: (sessionPath: string) => void;
@@ -302,7 +314,7 @@ class SessionList implements Component, Focusable {
 	public onToggleScope?: () => void;
 	public onToggleSort?: () => void;
 	public onToggleNameFilter?: () => void;
-	public onTogglePath?: (showPath: boolean) => void;
+	public onTogglePin?: (pinPath: string, pinned: boolean) => void;
 	public onDeleteConfirmationChange?: (path: string | null) => void;
 	public onDeleteSession?: (sessionPath: string) => Promise<void>;
 	public onRenameSession?: (sessionPath: string) => void;
@@ -320,7 +332,7 @@ class SessionList implements Component, Focusable {
 	}
 
 	constructor(
-		sessions: SessionInfo[],
+		sessions: SessionSelectorSession[],
 		showCwd: boolean,
 		sortMode: SortMode,
 		nameFilter: NameFilter,
@@ -358,10 +370,27 @@ class SessionList implements Component, Focusable {
 		this.filterSessions(this.searchInput.getValue());
 	}
 
-	setSessions(sessions: SessionInfo[], showCwd: boolean): void {
+	setSessions(sessions: SessionSelectorSession[], showCwd: boolean): void {
 		this.allSessions = sessions;
 		this.showCwd = showCwd;
 		this.filterSessions(this.searchInput.getValue());
+	}
+
+	setSessionPinned(pinPath: string, pinned: boolean): void {
+		const selectedPath = this.getSelectedSessionPath();
+		this.allSessions = this.allSessions.map((session) =>
+			(session.pinPath ?? canonicalizePath(session.path) ?? session.path) === pinPath
+				? { ...session, pinned }
+				: session,
+		);
+		this.filterSessions(this.searchInput.getValue());
+		if (selectedPath) {
+			const selectedCanonicalPath = canonicalizePath(selectedPath) ?? selectedPath;
+			const nextIndex = this.filteredSessions.findIndex(
+				(node) => (canonicalizePath(node.session.path) ?? node.session.path) === selectedCanonicalPath,
+			);
+			if (nextIndex >= 0) this.selectedIndex = nextIndex;
+		}
 	}
 
 	private filterSessions(query: string): void {
@@ -468,17 +497,15 @@ class SessionList implements Component, Focusable {
 			if (this.showCwd && session.cwd) {
 				rightPart = `${shortenPath(session.cwd)} ${rightPart}`;
 			}
-			if (this.showPath) {
-				rightPart = `${shortenPath(session.path)} ${rightPart}`;
-			}
 
-			// Cursor
+			// Cursor and pin marker
 			const cursor = isSelected ? theme.fg("accent", "› ") : "  ";
+			const pinMarker = session.pinned ? theme.fg("warning", "◆ ") : "  ";
 
 			// Calculate available width for message
 			const prefixWidth = visibleWidth(prefix);
 			const rightWidth = visibleWidth(rightPart) + 2; // +2 for spacing
-			const availableForMsg = width - 2 - prefixWidth - rightWidth; // -2 for cursor
+			const availableForMsg = width - 2 - visibleWidth(pinMarker) - prefixWidth - rightWidth; // -2 for cursor
 
 			const truncatedMsg = truncateToWidth(normalizedMessage, Math.max(10, availableForMsg), "…");
 
@@ -497,7 +524,7 @@ class SessionList implements Component, Focusable {
 			}
 
 			// Build line
-			const leftPart = cursor + theme.fg("dim", prefix) + styledMsg;
+			const leftPart = cursor + pinMarker + theme.fg("dim", prefix) + styledMsg;
 			const leftWidth = visibleWidth(leftPart);
 			const spacing = Math.max(1, width - leftWidth - visibleWidth(rightPart));
 			const styledRight = theme.fg(isConfirmingDelete ? "error" : "dim", rightPart);
@@ -565,10 +592,13 @@ class SessionList implements Component, Focusable {
 			return;
 		}
 
-		// Ctrl+P: toggle path display
-		if (kb.matches(keyData, "app.session.togglePath")) {
-			this.showPath = !this.showPath;
-			this.onTogglePath?.(this.showPath);
+		if (this.keybindings.matches(keyData, "app.session.togglePin")) {
+			const selected = this.filteredSessions[this.selectedIndex];
+			if (selected) {
+				const pinPath =
+					selected.session.pinPath ?? canonicalizePath(selected.session.path) ?? selected.session.path;
+				this.onTogglePin?.(pinPath, !selected.session.pinned);
+			}
 			return;
 		}
 
@@ -704,12 +734,13 @@ export class SessionSelectorComponent extends Container implements Focusable {
 	private scope: SessionScope = "current";
 	private sortMode: SortMode = "threaded";
 	private nameFilter: NameFilter = "all";
-	private currentSessions: SessionInfo[] | null = null;
-	private allSessions: SessionInfo[] | null = null;
+	private currentSessions: SessionSelectorSession[] | null = null;
+	private allSessions: SessionSelectorSession[] | null = null;
 	private currentSessionsLoader: SessionsLoader;
 	private allSessionsLoader: SessionsLoader;
 	private requestRender: () => void;
 	private renameSession?: (sessionPath: string, currentName: string | undefined) => Promise<void>;
+	private pinStore: SessionPinStore;
 	private currentLoading = false;
 	private allLoading = false;
 	private allLoadSeq = 0;
@@ -753,23 +784,25 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		onCancel: () => void,
 		onExit: () => void,
 		requestRender: () => void,
-		options?: {
+		options: {
 			renameSession?: (sessionPath: string, currentName: string | undefined) => Promise<void>;
 			showRenameHint?: boolean;
 			keybindings?: KeybindingsManager;
+			pinStorePath: string;
 		},
 		currentSessionFilePath?: string,
 	) {
 		super();
-		this.keybindings = options?.keybindings ?? KeybindingsManager.create();
+		this.keybindings = options.keybindings ?? KeybindingsManager.create();
 		this.currentSessionsLoader = currentSessionsLoader;
 		this.allSessionsLoader = allSessionsLoader;
 		this.requestRender = requestRender;
+		this.pinStore = new SessionPinStore(options.pinStorePath);
 		this.header = new SessionSelectorHeader(this.scope, this.sortMode, this.nameFilter, this.requestRender);
-		const renameSession = options?.renameSession;
+		const renameSession = options.renameSession;
 		this.renameSession = renameSession;
 		this.canRename = !!renameSession;
-		this.header.setShowRenameHint(options?.showRenameHint ?? this.canRename);
+		this.header.setShowRenameHint(options.showRenameHint ?? this.canRename);
 
 		// Create session list (starts empty, will be populated after load)
 		this.sessionList = new SessionList(
@@ -813,12 +846,11 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			const session = sessions.find((s) => s.path === sessionPath);
 			this.enterRenameMode(sessionPath, session?.name);
 		};
+		this.sessionList.onTogglePin = (pinPath, pinned) => {
+			this.togglePin(pinPath, pinned);
+		};
 
 		// Sync list events to header
-		this.sessionList.onTogglePath = (showPath) => {
-			this.header.setShowPath(showPath);
-			this.requestRender();
-		};
 		this.sessionList.onDeleteConfirmationChange = (path) => {
 			this.header.setConfirmingDeletePath(path);
 			this.requestRender();
@@ -830,9 +862,21 @@ export class SessionSelectorComponent extends Container implements Focusable {
 
 		// Handle session deletion
 		this.sessionList.onDeleteSession = async (sessionPath: string) => {
+			const sessions = this.scope === "all" ? this.allSessions : this.currentSessions;
+			const pinPath =
+				sessions?.find((session) => session.path === sessionPath)?.pinPath ??
+				canonicalizePath(sessionPath) ??
+				sessionPath;
 			const result = await deleteSessionFile(sessionPath);
 
 			if (result.ok) {
+				let pinCleanupError: string | undefined;
+				try {
+					this.pinStore.setPinned(pinPath, false);
+				} catch (error) {
+					pinCleanupError = error instanceof Error ? error.message : String(error);
+				}
+
 				if (this.currentSessions) {
 					this.currentSessions = this.currentSessions.filter((s) => s.path !== sessionPath);
 				}
@@ -844,8 +888,15 @@ export class SessionSelectorComponent extends Container implements Focusable {
 				const showCwd = this.scope === "all";
 				this.sessionList.setSessions(sessions, showCwd);
 
-				const msg = result.method === "trash" ? "Session moved to trash" : "Session deleted";
-				this.header.setStatusMessage({ type: "info", message: msg }, 2000);
+				if (pinCleanupError) {
+					this.header.setStatusMessage(
+						{ type: "error", message: `Session deleted, but failed to remove pin: ${pinCleanupError}` },
+						3000,
+					);
+				} else {
+					const msg = result.method === "trash" ? "Session moved to trash" : "Session deleted";
+					this.header.setStatusMessage({ type: "info", message: msg }, 2000);
+				}
 				await this.refreshSessionsAfterMutation();
 			} else {
 				const errorMessage = result.error ?? "Unknown error";
@@ -861,6 +912,26 @@ export class SessionSelectorComponent extends Container implements Focusable {
 
 	private loadCurrentSessions(): void {
 		void this.loadScope("current", "initial");
+	}
+
+	private togglePin(pinPath: string, pinned: boolean): void {
+		try {
+			this.pinStore.setPinned(pinPath, pinned);
+			const updateSessions = (sessions: SessionSelectorSession[] | null): SessionSelectorSession[] | null =>
+				sessions?.map((session) =>
+					(session.pinPath ?? canonicalizePath(session.path) ?? session.path) === pinPath
+						? { ...session, pinned }
+						: session,
+				) ?? null;
+			this.currentSessions = updateSessions(this.currentSessions);
+			this.allSessions = updateSessions(this.allSessions);
+			this.sessionList.setSessionPinned(pinPath, pinned);
+			this.header.setStatusMessage({ type: "info", message: pinned ? "Session pinned" : "Session unpinned" }, 2000);
+		} catch (err) {
+			const message = err instanceof Error ? err.message : String(err);
+			this.header.setStatusMessage({ type: "error", message: `Failed to update pin: ${message}` }, 3000);
+		}
+		this.requestRender();
 	}
 
 	private enterRenameMode(sessionPath: string, currentName: string | undefined): void {
@@ -942,9 +1013,14 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		};
 
 		try {
-			const sessions = await (scope === "current"
+			const loadedSessions = await (scope === "current"
 				? this.currentSessionsLoader(onProgress)
 				: this.allSessionsLoader(onProgress));
+			const pinnedPaths = this.pinStore.getPinnedSessionPaths();
+			const sessions: SessionSelectorSession[] = loadedSessions.map((session) => {
+				const pinPath = canonicalizePath(session.path) ?? session.path;
+				return { ...session, pinPath, pinned: pinnedPaths.has(pinPath) };
+			});
 
 			if (scope === "current") {
 				this.currentSessions = sessions;

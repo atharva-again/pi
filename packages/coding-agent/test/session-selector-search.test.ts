@@ -1,15 +1,19 @@
 import { describe, expect, it } from "vitest";
 import type { SessionInfo } from "../src/core/session-manager.ts";
-import { filterAndSortSessions } from "../src/modes/interactive/components/session-selector-search.ts";
+import {
+	filterAndSortSessions,
+	type SessionSelectorSession,
+} from "../src/modes/interactive/components/session-selector-search.ts";
 
 function makeSession(
-	overrides: Partial<SessionInfo> & { id: string; modified: Date; allMessagesText: string },
-): SessionInfo {
+	overrides: Partial<SessionSelectorSession> & { id: string; modified: Date; allMessagesText: string },
+): SessionSelectorSession {
 	return {
 		path: `/tmp/${overrides.id}.jsonl`,
 		id: overrides.id,
 		cwd: overrides.cwd ?? "",
 		name: overrides.name,
+		pinned: overrides.pinned,
 		created: overrides.created ?? new Date(0),
 		modified: overrides.modified,
 		messageCount: overrides.messageCount ?? 1,
@@ -53,6 +57,46 @@ describe("session selector search", () => {
 
 		const result = filterAndSortSessions(sessions, "re:\\bbrave\\b", "recent");
 		expect(result.map((s) => s.id)).toEqual(["a"]);
+	});
+
+	it("pins sessions while preserving order within pinned and regular groups", () => {
+		const sessions: SessionSelectorSession[] = [
+			makeSession({
+				id: "newest",
+				modified: new Date("2026-01-04T00:00:00.000Z"),
+				allMessagesText: "brave",
+			}),
+			makeSession({
+				id: "pinned-newer",
+				pinned: true,
+				modified: new Date("2026-01-03T00:00:00.000Z"),
+				allMessagesText: "xxxx brave",
+			}),
+			makeSession({
+				id: "pinned-older",
+				pinned: true,
+				modified: new Date("2026-01-01T00:00:00.000Z"),
+				allMessagesText: "xxxx brave",
+			}),
+			makeSession({
+				id: "oldest",
+				modified: new Date("2025-12-31T00:00:00.000Z"),
+				allMessagesText: "brave",
+			}),
+		];
+
+		expect(filterAndSortSessions(sessions, "", "recent").map((session) => session.id)).toEqual([
+			"pinned-newer",
+			"pinned-older",
+			"newest",
+			"oldest",
+		]);
+		expect(filterAndSortSessions(sessions, '"brave"', "relevance").map((session) => session.id)).toEqual([
+			"pinned-newer",
+			"pinned-older",
+			"newest",
+			"oldest",
+		]);
 	});
 
 	it("recent sort preserves input order", () => {

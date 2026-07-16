@@ -89,6 +89,7 @@ const CTRL_BACKSPACE = "\x1b[127;5u";
 describe("session selector path/delete interactions", () => {
 	const keybindings = new KeybindingsManager();
 	const tempDirs: string[] = [];
+	let pinStorePath: string;
 
 	afterEach(() => {
 		for (const dir of tempDirs.splice(0)) {
@@ -99,6 +100,9 @@ describe("session selector path/delete interactions", () => {
 	beforeEach(() => {
 		// Ensure test isolation: keybindings are a global singleton
 		setKeybindings(new KeybindingsManager());
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-selector-pin-store-"));
+		tempDirs.push(tempDir);
+		pinStorePath = join(tempDir, "session-pins.json");
 	});
 
 	beforeAll(() => {
@@ -115,7 +119,7 @@ describe("session selector path/delete interactions", () => {
 			() => {},
 			() => {},
 			() => {},
-			{ keybindings },
+			{ keybindings, pinStorePath },
 		);
 		await flushPromises();
 
@@ -139,7 +143,7 @@ describe("session selector path/delete interactions", () => {
 			() => {},
 			() => {},
 			() => {},
-			{ keybindings },
+			{ keybindings, pinStorePath },
 		);
 		await flushPromises();
 
@@ -163,7 +167,7 @@ describe("session selector path/delete interactions", () => {
 			() => {},
 			() => {},
 			() => {},
-			{ keybindings },
+			{ keybindings, pinStorePath },
 		);
 		await flushPromises();
 
@@ -199,7 +203,7 @@ describe("session selector path/delete interactions", () => {
 			() => {},
 			() => {},
 			() => {},
-			{ keybindings },
+			{ keybindings, pinStorePath },
 		);
 		await flushPromises();
 
@@ -231,7 +235,7 @@ describe("session selector path/delete interactions", () => {
 			() => {},
 			() => {},
 			() => {},
-			{ keybindings },
+			{ keybindings, pinStorePath },
 		);
 		await flushPromises();
 
@@ -273,7 +277,7 @@ describe("session selector path/delete interactions", () => {
 			() => {},
 			() => {},
 			() => {},
-			{ keybindings },
+			{ keybindings, pinStorePath },
 		);
 		await flushPromises();
 
@@ -307,7 +311,7 @@ describe("session selector path/delete interactions", () => {
 			() => {},
 			() => {},
 			() => {},
-			{ keybindings },
+			{ keybindings, pinStorePath },
 		);
 		await flushPromises();
 
@@ -333,7 +337,7 @@ describe("session selector path/delete interactions", () => {
 			() => {},
 			() => {},
 			() => {},
-			{ keybindings },
+			{ keybindings, pinStorePath },
 			paths.parentAliasA,
 		);
 		await flushPromises();

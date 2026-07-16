@@ -5,6 +5,8 @@ export type SortMode = "threaded" | "recent" | "relevance";
 
 export type NameFilter = "all" | "named";
 
+export type SessionSelectorSession = SessionInfo & { pinned?: boolean; pinPath?: string };
+
 export interface ParsedSearchQuery {
 	mode: "tokens" | "regex";
 	tokens: { kind: "fuzzy" | "phrase"; value: string }[];
@@ -34,6 +36,12 @@ export function hasSessionName(session: SessionInfo): boolean {
 function matchesNameFilter(session: SessionInfo, filter: NameFilter): boolean {
 	if (filter === "all") return true;
 	return hasSessionName(session);
+}
+
+function pinsFirst(sessions: SessionSelectorSession[]): SessionSelectorSession[] {
+	const pinned = sessions.filter((session) => session.pinned);
+	if (pinned.length === 0) return sessions;
+	return [...pinned, ...sessions.filter((session) => !session.pinned)];
 }
 
 export function parseSearchQuery(query: string): ParsedSearchQuery {
@@ -154,15 +162,15 @@ export function matchSession(session: SessionInfo, parsed: ParsedSearchQuery): M
 }
 
 export function filterAndSortSessions(
-	sessions: SessionInfo[],
+	sessions: SessionSelectorSession[],
 	query: string,
 	sortMode: SortMode,
 	nameFilter: NameFilter = "all",
-): SessionInfo[] {
+): SessionSelectorSession[] {
 	const nameFiltered =
 		nameFilter === "all" ? sessions : sessions.filter((session) => matchesNameFilter(session, nameFilter));
 	const trimmed = query.trim();
-	if (!trimmed) return nameFiltered;
+	if (!trimmed) return pinsFirst(nameFiltered);
 
 	const parsed = parseSearchQuery(query);
 	if (parsed.error) return [];
@@ -174,11 +182,11 @@ export function filterAndSortSessions(
 			const res = matchSession(s, parsed);
 			if (res.matches) filtered.push(s);
 		}
-		return filtered;
+		return pinsFirst(filtered);
 	}
 
 	// Relevance mode: sort by score, tie-break by modified desc.
-	const scored: { session: SessionInfo; score: number }[] = [];
+	const scored: { session: SessionSelectorSession; score: number }[] = [];
 	for (const s of nameFiltered) {
 		const res = matchSession(s, parsed);
 		if (!res.matches) continue;
@@ -186,6 +194,9 @@ export function filterAndSortSessions(
 	}
 
 	scored.sort((a, b) => {
+		if (Boolean(a.session.pinned) !== Boolean(b.session.pinned)) {
+			return a.session.pinned ? -1 : 1;
+		}
 		if (a.score !== b.score) return a.score - b.score;
 		return b.session.modified.getTime() - a.session.modified.getTime();
 	});
