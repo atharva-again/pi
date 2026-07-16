@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `max` thinking level to Telegram model controls.
+
 ### Changed
 
 - Updated Pi runtime dependencies to 0.80.8 using the refreshed Telegram RPC support fork.
