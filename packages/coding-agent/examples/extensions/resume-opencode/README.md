@@ -1,4 +1,4 @@
-# pi-resume-opencode
+# @atharva-again/pi-resume-opencode
 
 A Pi extension that imports an OpenCode session into a new native Pi session.
 
@@ -15,7 +15,7 @@ The extension has been tested against OpenCode 1.17.20.
 From npm:
 
 ```bash
-pi install npm:pi-resume-opencode@0.1.0
+pi install npm:@atharva-again/pi-resume-opencode@0.1.0
 ```
 
 For local development:
@@ -65,10 +65,10 @@ Imported history is limited to half of the active model's context window, capped
 
 ## Publishing
 
-The npm package name `pi-resume-opencode` was unclaimed when this package was created. Verify availability before publishing:
+The package is published under the `@atharva-again` npm scope. Inspect the current published version with:
 
 ```bash
-npm view pi-resume-opencode version
+npm view @atharva-again/pi-resume-opencode version
 ```
 
 Inspect the package contents, then publish from this directory:

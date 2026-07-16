@@ -1,5 +1,5 @@
 {
-  "name": "pi-resume-opencode",
+  "name": "@atharva-again/pi-resume-opencode",
   "version": "0.1.0",
   "description": "Pi extension for safely resuming OpenCode sessions",
   "author": "Atharva Verma",
