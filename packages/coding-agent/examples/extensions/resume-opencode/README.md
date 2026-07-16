@@ -24,11 +24,7 @@ For local development:
 pi -e ./index.ts
 ```
 
-If this directory is moved to the root of a dedicated Git repository, users can also install a pinned release directly:
-
-```bash
-pi install git:github.com/OWNER/pi-resume-opencode@v0.1.0
-```
+Source is maintained in the [`atharva-again/pi`](https://github.com/atharva-again/pi/tree/main/packages/coding-agent/examples/extensions/resume-opencode) monorepo.
 
 ## Usage
 

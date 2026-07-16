@@ -5,6 +5,15 @@
   "author": "Atharva Verma",
   "type": "module",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atharva-again/pi.git",
+    "directory": "packages/coding-agent/examples/extensions/resume-opencode"
+  },
+  "homepage": "https://github.com/atharva-again/pi/tree/main/packages/coding-agent/examples/extensions/resume-opencode#readme",
+  "bugs": {
+    "url": "https://github.com/atharva-again/pi/issues"
+  },
   "keywords": [
     "pi-package",
     "pi-extension",
