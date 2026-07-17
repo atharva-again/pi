@@ -10,6 +10,7 @@ import {
 	parseCodexThread,
 	parseCodexThreadList,
 	type ResumeCodexDependencies,
+	resolveCodexScript,
 } from "../examples/extensions/resume-codex/index.ts";
 import type {
 	ExtensionCommandContext,
@@ -317,6 +318,24 @@ async function runCommand(command: RegisteredCommand, args: string, harness: Com
 }
 
 describe("resume-codex", () => {
+	it("resolves the Codex script from a custom Windows npm prefix", () => {
+		const prefix = "/custom/npm-prefix";
+		const expected = join(prefix, "node_modules", "@openai", "codex", "bin", "codex.js");
+
+		const resolved = resolveCodexScript({
+			platform: "win32",
+			appData: "/missing/appdata",
+			runNpmPrefixCommand(command, options) {
+				expect(command).toBe("npm prefix -g");
+				expect(options).toEqual({ encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+				return `${prefix}\r\n`;
+			},
+			pathExists: (path) => path === expected,
+		});
+
+		expect(resolved).toBe(expected);
+	});
+
 	it("imports user text and only completed assistant text", async () => {
 		const { command, state } = await loadCommand(async (method) => {
 			if (method !== "thread/read") throw new Error(`unexpected method ${method}`);
