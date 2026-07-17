@@ -1,7 +1,7 @@
-import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { type ChildProcessWithoutNullStreams, spawn, execSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, realpathSync } from "node:fs";
+import { join, resolve } from "node:path";
 import {
 	BorderedLoader,
 	type ExtensionAPI,
@@ -362,12 +362,38 @@ class StdioCodexAppServer implements CodexAppServerClient {
 	}
 }
 
+function resolveCodexScript(): string | undefined {
+	if (process.platform !== "win32") return undefined;
+	const roots: string[] = [];
+	if (process.env.APPDATA) roots.push(join(process.env.APPDATA, "npm"));
+	try {
+		const prefix = execSync("npm config get prefix", { encoding: "utf8", stdio: "ignore" }).trim();
+		if (prefix) roots.push(prefix);
+	} catch {
+		// ignore - try other roots
+	}
+	for (const root of roots) {
+		const candidate = join(root, "node_modules", "@openai", "codex", "bin", "codex.js");
+		if (existsSync(candidate)) return candidate;
+	}
+	return undefined;
+}
+
 async function openCodexAppServer(options: CodexAppServerOptions): Promise<CodexAppServerClient> {
-	const child = spawn("codex", ["app-server"], {
-		cwd: options.cwd,
-		shell: false,
-		stdio: ["pipe", "pipe", "pipe"],
-	});
+	const codexScript = resolveCodexScript();
+	const child =
+		codexScript !== undefined
+			? spawn(process.execPath, [codexScript, "app-server"], {
+				cwd: options.cwd,
+				shell: false,
+				windowsHide: true,
+				stdio: ["pipe", "pipe", "pipe"],
+			})
+			: spawn("codex", ["app-server"], {
+				cwd: options.cwd,
+				shell: false,
+				stdio: ["pipe", "pipe", "pipe"],
+			});
 	const client = new StdioCodexAppServer(child, options.signal);
 	try {
 		await client.request(
@@ -847,7 +873,7 @@ async function listCodexSessions(client: CodexAppServerClient): Promise<CodexSes
 			{
 				cursor: cursor ?? null,
 				limit: SESSION_PAGE_SIZE,
-				sortKey: "recency_at",
+				sortKey: "updated_at",
 				sortDirection: "desc",
 				sourceKinds: ["cli", "vscode"],
 				archived: false,
