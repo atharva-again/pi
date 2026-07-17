@@ -889,18 +889,32 @@ async function listCodexSessions(client: CodexAppServerClient): Promise<CodexSes
 	let cursor: string | undefined;
 
 	do {
-		const response = await client.request(
-			"thread/list",
-			{
-				cursor: cursor ?? null,
-				limit: SESSION_PAGE_SIZE,
-				sortKey: "recency_at",
-				sortDirection: "desc",
-				sourceKinds: ["cli", "vscode"],
-				archived: false,
-			},
-			SESSION_LIST_TIMEOUT_MS,
-		);
+		let response: unknown;
+		let lastError: unknown;
+		for (const sortKey of ["recency_at", "updated_at"] as const) {
+			try {
+				response = await client.request(
+					"thread/list",
+					{
+						cursor: cursor ?? null,
+						limit: SESSION_PAGE_SIZE,
+						sortKey,
+						sortDirection: "desc",
+						sourceKinds: ["cli", "vscode"],
+						archived: false,
+					},
+					SESSION_LIST_TIMEOUT_MS,
+				);
+				break;
+			} catch (error) {
+				lastError = error;
+				const message = error instanceof Error ? error.message : String(error);
+				// codex <0.144.5 rejects recency_at; fall back to updated_at
+				if (sortKey === "recency_at" && /unknown variant .recency_at./.test(message)) continue;
+				throw error;
+			}
+		}
+		if (!response) throw lastError instanceof Error ? lastError : new Error(String(lastError));
 		const page = parseCodexThreadList(response);
 		for (const session of page.sessions) {
 			if (sessions.size >= MAX_LISTED_SESSIONS && !sessions.has(session.id)) break;
