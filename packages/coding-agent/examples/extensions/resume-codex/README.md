@@ -17,7 +17,7 @@ pi install npm:@atharva-again/pi-resume-codex
 Requirements:
 
 - Pi 0.80.7 or newer
-- A recent `codex` CLI available on `PATH`
+- A recent `codex` CLI installed globally; standard Windows npm installs are also detected when npm's global bin directory is not on `PATH`
 - An existing local Codex session
 
 The extension has been tested with Codex CLI 0.144.5.

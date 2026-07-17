@@ -1,4 +1,9 @@
-import { type ChildProcessWithoutNullStreams, spawn, execSync } from "node:child_process";
+import {
+	type ChildProcessWithoutNullStreams,
+	type ExecSyncOptionsWithStringEncoding,
+	execSync,
+	spawn,
+} from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, realpathSync } from "node:fs";
 import { join, resolve } from "node:path";
@@ -28,6 +33,15 @@ const MAX_EXPORTED_ITEMS = 100_000;
 interface CodexAppServerOptions {
 	cwd: string;
 	signal?: AbortSignal;
+}
+
+type RunNpmPrefixCommand = (command: string, options: ExecSyncOptionsWithStringEncoding) => string;
+
+export interface CodexScriptResolverOptions {
+	platform?: NodeJS.Platform;
+	appData?: string;
+	runNpmPrefixCommand?: RunNpmPrefixCommand;
+	pathExists?: (path: string) => boolean;
 }
 
 export interface CodexAppServerClient {
@@ -362,19 +376,26 @@ class StdioCodexAppServer implements CodexAppServerClient {
 	}
 }
 
-function resolveCodexScript(): string | undefined {
-	if (process.platform !== "win32") return undefined;
+export function resolveCodexScript(options: CodexScriptResolverOptions = {}): string | undefined {
+	const { platform = process.platform, appData = process.env.APPDATA, pathExists = existsSync } = options;
+	const runNpmPrefixCommand: RunNpmPrefixCommand =
+		options.runNpmPrefixCommand ?? ((command, commandOptions) => execSync(command, commandOptions));
+	if (platform !== "win32") return undefined;
+
 	const roots: string[] = [];
-	if (process.env.APPDATA) roots.push(join(process.env.APPDATA, "npm"));
+	if (appData) roots.push(join(appData, "npm"));
 	try {
-		const prefix = execSync("npm config get prefix", { encoding: "utf8", stdio: "ignore" }).trim();
+		const prefix = runNpmPrefixCommand("npm prefix -g", {
+			encoding: "utf8",
+			stdio: ["ignore", "pipe", "ignore"],
+		}).trim();
 		if (prefix) roots.push(prefix);
 	} catch {
-		// ignore - try other roots
+		// npm is optional when the standard root or PATH fallback is available.
 	}
 	for (const root of roots) {
 		const candidate = join(root, "node_modules", "@openai", "codex", "bin", "codex.js");
-		if (existsSync(candidate)) return candidate;
+		if (pathExists(candidate)) return candidate;
 	}
 	return undefined;
 }
@@ -384,16 +405,16 @@ async function openCodexAppServer(options: CodexAppServerOptions): Promise<Codex
 	const child =
 		codexScript !== undefined
 			? spawn(process.execPath, [codexScript, "app-server"], {
-				cwd: options.cwd,
-				shell: false,
-				windowsHide: true,
-				stdio: ["pipe", "pipe", "pipe"],
-			})
+					cwd: options.cwd,
+					shell: false,
+					windowsHide: true,
+					stdio: ["pipe", "pipe", "pipe"],
+				})
 			: spawn("codex", ["app-server"], {
-				cwd: options.cwd,
-				shell: false,
-				stdio: ["pipe", "pipe", "pipe"],
-			});
+					cwd: options.cwd,
+					shell: false,
+					stdio: ["pipe", "pipe", "pipe"],
+				});
 	const client = new StdioCodexAppServer(child, options.signal);
 	try {
 		await client.request(
@@ -873,7 +894,7 @@ async function listCodexSessions(client: CodexAppServerClient): Promise<CodexSes
 			{
 				cursor: cursor ?? null,
 				limit: SESSION_PAGE_SIZE,
-				sortKey: "updated_at",
+				sortKey: "recency_at",
 				sortDirection: "desc",
 				sourceKinds: ["cli", "vscode"],
 				archived: false,

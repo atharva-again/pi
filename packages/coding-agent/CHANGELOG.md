@@ -6,6 +6,10 @@
 
 - Added `Ctrl+P` pin toggling in `/resume`, with pinned sessions stored separately and shown above other sessions.
 
+### Fixed
+
+- Fixed the `resume-codex` extension to launch standard npm Codex installations on Windows when npm's global bin directory is not on `PATH` ([#18](https://github.com/atharva-again/pi/pull/18) by [@Only-Moon](https://github.com/Only-Moon)).
+
 ## [0.80.9] - 2026-07-16
 
 ### New Features
