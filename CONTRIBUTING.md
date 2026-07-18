@@ -37,4 +37,4 @@ If you are adding a new provider to `packages/ai`, see `AGENTS.md` for required 
 
 ## Issues
 
-GitHub Issues are not enabled for this fork. If you have a fix, submit a focused PR with enough context to understand and verify the problem.
+GitHub Issues are enabled for this fork. Keep reports focused and include enough context to understand and verify the problem. If you have a fix, submit a focused PR.
