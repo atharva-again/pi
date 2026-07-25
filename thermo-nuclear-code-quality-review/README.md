@@ -5,7 +5,13 @@
 but uses [Cursor's Thermo-Nuclear Code Quality Review skill](https://github.com/cursor/plugins/blob/main/cursor-team-kit/skills/thermo-nuclear-code-quality-review/SKILL.md)
 as its review prompt.
 
-## Install locally
+## Install
+
+```bash
+pi install npm:@atharva-again/thermo-nuclear-code-quality-review
+```
+
+For a local checkout:
 
 ```bash
 pi install ./thermo-nuclear-code-quality-review

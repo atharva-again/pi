@@ -1,5 +1,5 @@
 {
-	"name": "thermo-nuclear-code-quality-review",
+	"name": "@atharva-again/thermo-nuclear-code-quality-review",
 	"version": "0.1.0",
 	"author": "Atharva Verma",
 	"description": "Thermo-nuclear code-quality review workflow for pi",
