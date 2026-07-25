@@ -1,0 +1,35 @@
+{
+	"name": "thermo-nuclear-code-quality-review",
+	"version": "0.1.0",
+	"author": "Atharva Verma",
+	"description": "Thermo-nuclear code-quality review workflow for pi",
+	"type": "module",
+	"exports": {
+		".": {
+			"types": "./review.ts",
+			"default": "./review.ts"
+		}
+	},
+	"types": "./review.ts",
+	"keywords": [
+		"pi-package",
+		"pi-extension"
+	],
+	"pi": {
+		"extensions": [
+			"./review.ts"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-tui": "*"
+	},
+	"devDependencies": {
+		"@types/node": "22.19.19",
+		"typescript": "5.9.3"
+	},
+	"scripts": {
+		"typecheck": "tsc --noEmit"
+	}
+}
