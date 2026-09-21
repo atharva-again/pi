@@ -91,6 +91,8 @@ interface AgentSession {
 
   // State access
   agent: Agent;
+  sessionManager: SessionManager;
+  refreshContext(): void;
   model: Model | undefined;
   thinkingLevel: ThinkingLevel;
   messages: AgentMessage[];
@@ -110,6 +112,8 @@ interface AgentSession {
   dispose(): void;
 }
 ```
+
+`session.navigateTree()` rejects while an agent response, manual or automatic compaction, or another tree navigation is active, even with `summarize: false`. It does not queue navigation or return `{ cancelled: true }` for these conflicts. Wait for the active operation to finish (for example, with `await session.waitForIdle()`) and retry. Rejection leaves the active branch unchanged.
 
 Session replacement APIs such as new-session, resume, fork, and import live on `AgentSessionRuntime`, not on `AgentSession`.
 
@@ -244,13 +248,13 @@ const state = session.agent.state;
 // state.messages: AgentMessage[] - conversation history
 // state.model: Model - current model
 // state.thinkingLevel: ThinkingLevel - current thinking level
-// state.systemPrompt: string - system prompt
-// state.tools: AgentTool[] - available tools
+// state.systemPrompt: string - read-only, replayed from the transcript's system messages
+// state.tools: AgentTool[] - executable tools; changes are declared to the model before the next request
 // state.streamingMessage?: AgentMessage - current partial assistant message
 // state.errorMessage?: string - latest assistant error
 
-// Replace messages (useful for branching or restoration)
-session.agent.state.messages = messages; // copies the top-level array
+// Model-visible messages are projected from session.sessionManager.
+// agent.state.messages is a refreshed inspection cache; do not assign it for restoration.
 
 // Replace tools
 session.agent.state.tools = tools; // copies the top-level array
@@ -258,6 +262,15 @@ session.agent.state.tools = tools; // copies the top-level array
 // Wait for agent to finish processing
 await session.agent.waitForIdle();
 ```
+
+Provider requests use `session.sessionManager` as the canonical finalized context. Assigning `session.agent.state.messages` does not replace persisted context and may be overwritten at the next request boundary. Restore externally stored history when constructing the session instead:
+
+```typescript
+const restoredManager = SessionManager.inMemory(process.cwd(), { id: sessionId }, entries);
+const { session } = await createAgentSession({ sessionManager: restoredManager });
+```
+
+For an existing session, use `session.navigateTree(entryId)` to move its active branch. Use `session.sessionManager.appendMessage(...)` plus `session.refreshContext()` only when intentionally appending externally managed entries.
 
 ### Events
 
@@ -319,6 +332,9 @@ session.subscribe((event) => {
     case "compaction_end":
     case "auto_retry_start":
     case "auto_retry_end":
+    case "summarization_retry_scheduled":
+    case "summarization_retry_attempt_start":
+    case "summarization_retry_finished":
       break;
   }
 });
@@ -369,6 +385,13 @@ import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 
 const modelRuntime = await ModelRuntime.create();
 
+// create() restores cached catalogs but does not refresh them from pi.dev by default.
+// Opt in to a create-time network refresh and bound how long it may take:
+const refreshedRuntime = await ModelRuntime.create({
+  allowModelNetwork: true,
+  modelRefreshTimeoutMs: 15_000,
+});
+
 // Find specific built-in model (doesn't check if API key exists)
 const opus = getModel("anthropic", "claude-opus-4-5");
 if (!opus) throw new Error("Model not found");
@@ -398,6 +421,8 @@ If no model is provided:
 1. Tries to restore from session (if continuing)
 2. Uses default from settings
 3. Falls back to first available model
+
+Remote catalogs are persisted locally so later runtimes can restore them without a network request. The default file is `~/.pi/agent/models-store.json`; set `modelsStorePath` to choose another location, or inject `modelsStore` to control persistence. Network refreshes are throttled to once per provider every four hours unless forced. To force an immediate refresh, call `await modelRuntime.refresh({ allowNetwork: true, force: true, signal })`. Setting `PI_OFFLINE` disables model network access.
 
 To match CLI model parsing, use the exported resolver helpers:
 
@@ -449,7 +474,7 @@ for (const provider of modelRuntime.getProviders()) {
 }
 
 // Runtime API key override (not persisted to disk)
-modelRuntime.setRuntimeApiKey("anthropic", "sk-my-temp-key");
+await modelRuntime.setRuntimeApiKey("anthropic", "sk-my-temp-key");
 
 // Custom credential and model locations
 const customRuntime = await ModelRuntime.create({
@@ -465,6 +490,24 @@ const { session } = await createAgentSession({
   modelRuntime: customRuntime,
 });
 ```
+
+`login()`, `logout()`, `setRuntimeApiKey()`, and `removeRuntimeApiKey()` resolve after the affected provider's cached/built-in catalog, composition, and availability snapshot are locally consistent. They do not wait for remote catalog freshness. If credentials were committed but local synchronization fails, they reject with the exported `CredentialSynchronizationError`; inspect its `providerId`, `operation`, `credential`, and `cause` fields instead of retrying the credential mutation blindly.
+
+Public model/auth operations and `ModelRuntime.create({ signal })` accept optional abort signals and are unbounded when omitted. SDK applications own deadline policy for remote catalog freshness:
+
+```typescript
+const signal = AbortSignal.timeout(15_000);
+const result = await modelRuntime.refresh({
+  providers: ["anthropic"],
+  signal,
+});
+if (result.aborted) console.warn("Catalog refresh timed out; using cached models");
+for (const [providerId, error] of result.errors) {
+  console.warn(`Could not refresh ${providerId}:`, error);
+}
+```
+
+A failed or timed-out network refresh does not undo a successful credential operation. `refresh()` starts a new provider generation, so it does not wait behind an older stalled refresh and stale generations cannot publish afterward.
 
 > See [examples/sdk/09-api-keys-and-oauth.ts](../examples/sdk/09-api-keys-and-oauth.ts)
 
@@ -489,7 +532,7 @@ const { session } = await createAgentSession({ resourceLoader: loader });
 
 Specify which built-in tools to enable:
 
-- Built-in tool names: `read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`
+- Built-in tool names: `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, `ls`
 - Default built-ins: `read`, `bash`, `edit`, `write`
 - `noTools: "all"` disables all tools
 - `noTools: "builtin"` disables default built-ins while keeping extension and custom tools enabled
@@ -508,6 +551,11 @@ const { session } = await createAgentSession({
 // Pick specific tools
 const { session } = await createAgentSession({
   tools: ["read", "bash", "grep"],
+});
+
+// Use PowerShell instead of Bash on Windows
+const { session } = await createAgentSession({
+  tools: ["read", "powershell", "edit", "write"],
 });
 
 // Disable one tool while keeping the rest available
@@ -753,6 +801,11 @@ const { session: opened } = await createAgentSession({
   sessionManager: SessionManager.open("/path/to/session.jsonl"),
 });
 
+// Resume a session kept outside the filesystem, e.g. in a database
+const { session: restored } = await createAgentSession({
+  sessionManager: SessionManager.inMemory(process.cwd(), { id: sessionId }, entries),
+});
+
 // List sessions
 const currentProjectSessions = await SessionManager.list(process.cwd());
 const allSessions = await SessionManager.listAll(process.cwd());
@@ -935,7 +988,7 @@ const modelRuntime = await ModelRuntime.create({
   modelsPath: "/custom/agent/models.json",
 });
 if (process.env.MY_KEY) {
-  modelRuntime.setRuntimeApiKey("anthropic", process.env.MY_KEY);
+  await modelRuntime.setRuntimeApiKey("anthropic", process.env.MY_KEY);
 }
 
 // Inline tool
@@ -1141,6 +1194,7 @@ AgentSessionRuntime
 // Auth and Models
 ModelRuntime // implements pi-ai Models and owns credential storage
 ModelRegistry // synchronous extension compatibility facade
+CredentialSynchronizationError
 resolveCliModel
 resolveModelScopeWithDiagnostics
 
@@ -1165,7 +1219,7 @@ SettingsManager
 // Tool factories
 createCodingTools
 createReadOnlyTools
-createReadTool, createBashTool, createEditTool, createWriteTool
+createReadTool, createBashTool, createPowerShellTool, createEditTool, createWriteTool
 createGrepTool, createFindTool, createLsTool
 
 // Types

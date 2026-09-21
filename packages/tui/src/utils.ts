@@ -39,6 +39,12 @@ function couldBeEmoji(segment: string): boolean {
 // Regexes for character classification (same as string-width library)
 const zeroWidthRegex = /^(?:\p{Default_Ignorable_Code_Point}|\p{Control}|\p{Mark}|\p{Surrogate})+$/v;
 const leadingNonPrintingRegex = /^[\p{Default_Ignorable_Code_Point}\p{Control}\p{Format}\p{Mark}\p{Surrogate}]+/v;
+const nonPrintingCharRegex = /^(?:\p{Default_Ignorable_Code_Point}|\p{Control}|\p{Format}|\p{Mark}|\p{Surrogate})$/v;
+const markCharRegex = /^\p{Mark}$/v;
+// Marks that terminals allocate cells for when attached to a base character.
+// This includes Unicode spacing marks and non-spacing exceptions in legacy wcwidth tables.
+const terminalSpacingMarkRegex =
+	/^(?:[\p{Spacing_Mark}--[\u1734\u302E\u302F]]|[\u065F\u0F7F\u102B\u102C\u1031\u1033-\u1035\u1038\u103A-\u103E])+$/v;
 const rgiEmojiRegex = /^\p{RGI_Emoji}$/v;
 
 // Cache for non-ASCII strings
@@ -47,6 +53,14 @@ const widthCache = new Map<string, number>();
 
 export const cjkBreakRegex =
 	/[\p{Script_Extensions=Han}\p{Script_Extensions=Hiragana}\p{Script_Extensions=Katakana}\p{Script_Extensions=Hangul}\p{Script_Extensions=Bopomofo}]/u;
+
+// CJK letters remain part of words and paths; only punctuation can separate prose from completions.
+export const cjkPunctuationRegex = new RegExp(
+	`(?:(?=\\p{Punctuation})${cjkBreakRegex.source}|[，．：；！？（）［］｛｝“”‘’…—])`,
+	"u",
+);
+export const autocompleteSeparatorRegex = new RegExp(`(?:\\s|${cjkPunctuationRegex.source})`, "u");
+export const autocompleteBoundaryRegex = new RegExp(`(?:^|${autocompleteSeparatorRegex.source})`, "u");
 
 function isPrintableAscii(str: string): boolean {
 	for (let i = 0; i < str.length; i++) {
@@ -147,13 +161,14 @@ function finalizeTruncatedResult(
 	pad: boolean,
 ): string {
 	const reset = "\x1b[0m";
+	const hyperlinkClose = getActiveOsc8Close(prefix);
 	const visibleWidth = prefixWidth + ellipsisWidth;
 	let result: string;
 
 	if (ellipsis.length > 0) {
-		result = `${prefix}${reset}${ellipsis}${reset}`;
+		result = `${prefix}${hyperlinkClose}${reset}${ellipsis}${reset}`;
 	} else {
-		result = `${prefix}${reset}`;
+		result = `${prefix}${hyperlinkClose}${reset}`;
 	}
 
 	return pad ? result + " ".repeat(Math.max(0, maxWidth - visibleWidth)) : result;
@@ -167,6 +182,11 @@ function finalizeTruncatedResult(
 function graphemeWidth(segment: string): number {
 	if (segment === "\t") {
 		return 3;
+	}
+
+	// Some marks occupy cells even without a base character.
+	if (terminalSpacingMarkRegex.test(segment)) {
+		return [...segment].length;
 	}
 
 	// Zero-width clusters
@@ -195,15 +215,27 @@ function graphemeWidth(segment: string): number {
 
 	let width = eastAsianWidth(cp);
 
-	// Trailing halfwidth/fullwidth forms and AM vowels that segment with a base.
-	if (segment.length > 1) {
-		for (const char of segment.slice(1)) {
+	// Intl.Segmenter can group multiple terminal-spacing code points into one
+	// grapheme. Count trailing visible code points that terminals may allocate
+	// cells for: Indic consonants after marks, halfwidth/fullwidth forms, and
+	// Thai/Lao AM vowels.
+	let followsMark = false;
+	const chars = [...base];
+	for (const char of chars.slice(1)) {
+		if (terminalSpacingMarkRegex.test(char)) {
+			width += 1;
+			followsMark = false;
+		} else if (markCharRegex.test(char)) {
+			followsMark = true;
+		} else if (!nonPrintingCharRegex.test(char)) {
 			const c = char.codePointAt(0)!;
-			if (c >= 0xff00 && c <= 0xffef) {
+			if (followsMark || (c >= 0xff00 && c <= 0xffef)) {
+				// halfwidth + fullwidth forms
 				width += eastAsianWidth(c);
 			} else if (c === 0x0e33 || c === 0x0eb3) {
 				width += 1;
 			}
+			followsMark = false;
 		}
 	}
 
@@ -268,6 +300,77 @@ export function visibleWidth(str: string): number {
 	widthCache.set(str, width);
 
 	return width;
+}
+
+/** Remove ANSI, OSC, and APC control sequences while preserving visible text. */
+export function stripTerminalSequences(str: string): string {
+	if (!str.includes("\x1b")) return str;
+	let result = "";
+	let i = 0;
+	while (i < str.length) {
+		const ansi = extractAnsiCode(str, i);
+		if (ansi) {
+			i += ansi.length;
+			continue;
+		}
+		result += str[i];
+		i++;
+	}
+	return result;
+}
+
+interface GraphemeCellRange {
+	start: number;
+	end: number;
+}
+
+/** Return the terminal-cell range occupied by the grapheme at a visible column. */
+export function getGraphemeCellRange(line: string, column: number): GraphemeCellRange | undefined {
+	let currentCol = 0;
+	let i = 0;
+	while (i < line.length) {
+		const ansi = extractAnsiCode(line, i);
+		if (ansi) {
+			i += ansi.length;
+			continue;
+		}
+		let textEnd = i;
+		while (textEnd < line.length && !extractAnsiCode(line, textEnd)) textEnd++;
+		for (const { segment } of graphemeSegmenter.segment(line.slice(i, textEnd))) {
+			const width = graphemeWidth(segment);
+			if (width > 0 && column >= currentCol && column < currentCol + width) {
+				return { start: currentCol, end: currentCol + width };
+			}
+			currentCol += width;
+		}
+		i = textEnd;
+	}
+	return undefined;
+}
+
+/** Return the OSC 8 hyperlink covering a visible terminal column. */
+export function getOsc8LinkAtColumn(line: string, column: number): string | undefined {
+	let activeUrl: string | undefined;
+	let currentCol = 0;
+	let i = 0;
+	while (i < line.length) {
+		const ansi = extractAnsiCode(line, i);
+		if (ansi) {
+			const hyperlink = /^\x1b\]8;[^;]*;([^\x07\x1b]*)(?:\x07|\x1b\\)$/.exec(ansi.code);
+			if (hyperlink) activeUrl = hyperlink[1] || undefined;
+			i += ansi.length;
+			continue;
+		}
+		let textEnd = i;
+		while (textEnd < line.length && !extractAnsiCode(line, textEnd)) textEnd++;
+		for (const { segment } of graphemeSegmenter.segment(line.slice(i, textEnd))) {
+			const width = segment === "\t" ? 3 : graphemeWidth(segment);
+			if (column >= currentCol && column < currentCol + width) return activeUrl;
+			currentCol += width;
+		}
+		i = textEnd;
+	}
+	return undefined;
 }
 
 /**
@@ -382,6 +485,28 @@ function formatOsc8Hyperlink(hyperlink: ActiveHyperlink): string {
 
 function formatOsc8Close(terminator: Osc8Terminator): string {
 	return `\x1b]8;;${terminator}`;
+}
+
+function getActiveOsc8Close(prefix: string): string {
+	if (!prefix.includes("\x1b]8;")) {
+		return "";
+	}
+
+	let activeHyperlink: ActiveHyperlink | null = null;
+	let i = 0;
+	while (i < prefix.length) {
+		const ansi = extractAnsiCode(prefix, i);
+		if (ansi) {
+			const hyperlink = parseOsc8Hyperlink(ansi.code);
+			if (hyperlink !== undefined) {
+				activeHyperlink = hyperlink;
+			}
+			i += ansi.length;
+		} else {
+			i++;
+		}
+	}
+	return activeHyperlink ? formatOsc8Close(activeHyperlink.terminator) : "";
 }
 
 /**
@@ -575,6 +700,10 @@ class AnsiCodeTracker {
 		return result;
 	}
 
+	getActiveBackgroundCode(): string {
+		return this.bgColor ? `\x1b[${this.bgColor}m` : "";
+	}
+
 	hasActiveCodes(): boolean {
 		return (
 			this.bold ||
@@ -620,6 +749,13 @@ function updateTrackerFromText(text: string, tracker: AnsiCodeTracker): void {
 			i++;
 		}
 	}
+}
+
+/** Return only the background color active at the end of an ANSI-styled string. */
+export function getActiveBackgroundAnsi(text: string): string {
+	const tracker = new AnsiCodeTracker();
+	updateTrackerFromText(text, tracker);
+	return tracker.getActiveBackgroundCode();
 }
 
 /**
@@ -719,7 +855,7 @@ export function wrapTextWithAnsi(text: string, width: number): string[] {
 
 	// Handle newlines by processing each line separately
 	// Track ANSI state across lines so styles carry over after literal newlines
-	const inputLines = text.split("\n");
+	const inputLines = text.split(/\r\n|\r|\n/);
 	const result: string[] = [];
 	const tracker = new AnsiCodeTracker();
 

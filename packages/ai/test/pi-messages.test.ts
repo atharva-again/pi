@@ -2,7 +2,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { type PiMessagesOptions, stream, streamSimple } from "../src/api/pi-messages.ts";
-import type { Api, AssistantMessageEvent, Context, Model } from "../src/types.ts";
+import type { Api, AssistantMessageEvent, Context, Model, StopReason } from "../src/types.ts";
+import { normalizeContext } from "../src/utils/transcript.ts";
 
 type RecordedRequest = {
 	url: string;
@@ -110,13 +111,20 @@ describe("pi-messages", () => {
 					contentIndex: 1,
 					toolCall: { type: "toolCall", id: "call_1", name: "read", arguments: { path: "a.txt" } },
 				},
-				{ type: "done", reason: "toolUse", usage, responseId: "resp_1" },
+				{
+					type: "done",
+					reason: "toolUse",
+					usage,
+					responseId: "resp_1",
+					providerThinkingLevel: "high",
+				},
 			],
 		});
 		const model = createModel(baseUrl);
 
 		const events: AssistantMessageEvent[] = [];
-		const eventStream = stream(model, context, {
+		const partialStopReasons: StopReason[] = [];
+		const eventStream = stream(model, normalizeContext(context), {
 			apiKey: "test-key",
 			sessionId: "session-1",
 			toolChoice: "auto",
@@ -124,13 +132,18 @@ describe("pi-messages", () => {
 			headers: { "x-custom": "1" },
 		});
 		for await (const event of eventStream) {
+			if ("partial" in event) {
+				partialStopReasons.push(event.partial.stopReason);
+			}
 			events.push(event);
 		}
 		const message = await eventStream.result();
 
+		expect(partialStopReasons[0]).toBe("pending");
 		expect(message.stopReason).toBe("toolUse");
 		expect(message.usage).toEqual(usage);
 		expect(message.responseId).toBe("resp_1");
+		expect(message.providerThinkingLevel).toBe("high");
 		expect(message.model).toBe("auto");
 		expect(message.provider).toBe("radius");
 		expect(message.content).toEqual([
@@ -160,14 +173,14 @@ describe("pi-messages", () => {
 		const model = createModel(baseUrl);
 
 		let observedHeaders: Record<string, string> | undefined;
-		const options: PiMessagesOptions = {
+		const options = {
 			apiKey: "test-key",
 			debug: true,
 			onResponse: (response) => {
 				observedHeaders = response.headers;
 			},
-		};
-		const message = await streamSimple(model, context, options).result();
+		} satisfies PiMessagesOptions;
+		const message = await streamSimple(model, normalizeContext(context), options).result();
 
 		expect(message.stopReason).toBe("stop");
 		expect(requests[0].url).toBe("/v1/messages?debug=1");
@@ -181,7 +194,7 @@ describe("pi-messages", () => {
 		});
 		const model = createModel(baseUrl);
 
-		const message = await stream(model, context, { apiKey: "stale" }).result();
+		const message = await stream(model, normalizeContext(context), { apiKey: "stale" }).result();
 
 		expect(message.stopReason).toBe("error");
 		expect(message.errorMessage).toContain("401");
@@ -197,7 +210,7 @@ describe("pi-messages", () => {
 		});
 		const model = createModel(baseUrl);
 
-		const message = await stream(model, context, { apiKey: "test-key" }).result();
+		const message = await stream(model, normalizeContext(context), { apiKey: "test-key" }).result();
 
 		expect(message.stopReason).toBe("error");
 		expect(message.errorMessage).toBe("Upstream failed");
@@ -207,7 +220,7 @@ describe("pi-messages", () => {
 	it("errors when no API key is provided", async () => {
 		const model = createModel("http://127.0.0.1:1/v1");
 
-		const message = await stream(model, context).result();
+		const message = await stream(model, normalizeContext(context)).result();
 
 		expect(message.stopReason).toBe("error");
 		expect(message.errorMessage).toContain("No API key provided");
@@ -223,7 +236,7 @@ describe("pi-messages", () => {
 		});
 		const model = createModel(baseUrl);
 
-		const message = await stream(model, context, { apiKey: "test-key" }).result();
+		const message = await stream(model, normalizeContext(context), { apiKey: "test-key" }).result();
 
 		expect(message.stopReason).toBe("error");
 		expect(message.errorMessage).toContain("stream ended without a terminal event");

@@ -1,10 +1,12 @@
 import { join } from "node:path";
-import { Agent, type AgentMessage, type ThinkingLevel } from "@earendil-works/pi-agent-core";
-import { clampThinkingLevel, type Message, type Model } from "@earendil-works/pi-ai/compat";
+import { Agent, type AgentMessage, setDefaultStreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
+import type { ModelsSimpleStreamOptions } from "@earendil-works/pi-ai";
+import { clampThinkingLevel, type Message, type Model, streamSimple } from "@earendil-works/pi-ai/compat";
 import { getAgentDir } from "../config.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
+import { CacheWarmer } from "./cache-warmer.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { convertToLlm } from "./messages.ts";
@@ -23,12 +25,18 @@ import {
 	createFindTool,
 	createGrepTool,
 	createLsTool,
+	createPowerShellTool,
 	createReadOnlyTools,
 	createReadTool,
 	createWriteTool,
 	type ToolName,
 	withFileMutationQueue,
 } from "./tools/index.ts";
+
+// Preserve the pre-0.81 fallback for extensions that construct Agent instances
+// or invoke low-level agent loops without supplying streamFn. Agent core remains
+// provider-agnostic and does not import pi-ai/compat itself.
+setDefaultStreamFn(streamSimple);
 
 export interface CreateAgentSessionOptions {
 	/** Working directory for project-local discovery. Default: process.cwd() */
@@ -57,9 +65,11 @@ export interface CreateAgentSessionOptions {
 	/**
 	 * Optional allowlist of tool names.
 	 *
-	 * When omitted, pi enables the default built-in tools (read, bash, edit, write)
-	 * and leaves extension/custom tools enabled unless `noTools` changes that default.
-	 * When provided, only the listed tool names are enabled.
+	 * When omitted, pi uses the `defaultTools` setting for the initial built-in
+	 * selection when configured. Otherwise it enables the default built-in tools
+	 * (read, bash, edit, write). Extension/custom tools remain enabled unless
+	 * `noTools` changes that default. When provided, only the listed tool names are
+	 * enabled.
 	 */
 	tools?: string[];
 	/** Optional denylist of tool names to disable. Applies after `tools` when both are provided. */
@@ -118,6 +128,7 @@ export {
 	createGrepTool,
 	createFindTool,
 	createLsTool,
+	createPowerShellTool,
 };
 
 // Helper Functions
@@ -206,6 +217,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			defaultProvider: settingsManager.getDefaultProvider(),
 			defaultModelId: settingsManager.getDefaultModel(),
 			defaultThinkingLevel: settingsManager.getDefaultThinkingLevel(),
+			modelThinkingLevels: settingsManager.getAllModelThinkingLevels(),
 			modelRuntime,
 		});
 		model = result.model;
@@ -225,7 +237,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			: (settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL);
 	}
 
-	// Fall back to settings default
+	// Fall back to per-model override, then global default
+	if (thinkingLevel === undefined && model) {
+		const perModel = settingsManager.getModelThinkingLevel(model.provider, model.id);
+		if (perModel) {
+			thinkingLevel = perModel;
+		}
+	}
 	if (thinkingLevel === undefined) {
 		thinkingLevel = settingsManager.getDefaultThinkingLevel() ?? DEFAULT_THINKING_LEVEL;
 	}
@@ -238,14 +256,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	const defaultActiveToolNames: ToolName[] = ["read", "bash", "edit", "write"];
+	const configuredDefaultToolNames = settingsManager.getDefaultTools();
 	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
 	const excludedToolNames = options.excludeTools;
 	const excludedToolNameSet = excludedToolNames ? new Set(excludedToolNames) : undefined;
-	const initialActiveToolNames: string[] = (
-		options.tools ? [...options.tools] : options.noTools ? [] : defaultActiveToolNames
+	const initialActiveToolNames = (
+		options.tools ?? (options.noTools ? [] : (configuredDefaultToolNames ?? defaultActiveToolNames))
 	).filter((name) => !excludedToolNameSet?.has(name));
-
-	let agent: Agent;
 
 	// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
 	const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
@@ -285,62 +302,90 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	};
 
 	const extensionRunnerRef: { current?: ExtensionRunner } = {};
+	const cacheWarmer = new CacheWarmer(
+		modelRuntime,
+		sessionManager,
+		() => settingsManager.getCacheWarmingMode(),
+		async (event) => extensionRunnerRef.current?.emitCacheWarmingDecision(event) ?? event.action,
+	);
+	const buildRequestOptions = (
+		requestModel: Model<any>,
+		options: ModelsSimpleStreamOptions = {},
+	): ModelsSimpleStreamOptions => {
+		const providerRetrySettings = settingsManager.getProviderRetrySettings();
+		const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
+		const effectiveTimeoutMs = httpIdleTimeoutMs === 0 ? 2147483647 : httpIdleTimeoutMs;
+		const headerRunner = extensionRunnerRef.current;
+		return {
+			...options,
+			timeoutMs: options.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs,
+			websocketConnectTimeoutMs: options.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs(),
+			maxRetries: options.maxRetries ?? providerRetrySettings.maxRetries,
+			maxRetryDelayMs: options.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
+			transformHeaders: async (requestHeaders) => {
+				const headers = mergeProviderAttributionHeaders(
+					requestModel,
+					settingsManager,
+					options.sessionId,
+					requestHeaders,
+				);
+				return headerRunner?.hasHandlers("before_provider_headers")
+					? headerRunner.emitBeforeProviderHeaders(headers ?? {})
+					: (headers ?? {});
+			},
+		};
+	};
+	const cacheContextIsCurrent = (requestModel: Model<any>) => {
+		const messages = agent.state.messages;
+		return () => {
+			const currentModel = agent.state.model;
+			const currentMessages = agent.state.messages;
+			return (
+				currentModel.provider === requestModel.provider &&
+				currentModel.id === requestModel.id &&
+				messages.length <= currentMessages.length &&
+				messages.every((message, index) => currentMessages[index] === message)
+			);
+		};
+	};
+	const transformProviderPayload = async (payload: unknown) => {
+		const runner = extensionRunnerRef.current;
+		if (!runner?.hasHandlers("before_provider_request")) return payload;
+		return runner.emitBeforeProviderRequest(payload);
+	};
+	const handleProviderResponse: NonNullable<ModelsSimpleStreamOptions["onResponse"]> = async (response) => {
+		const runner = extensionRunnerRef.current;
+		if (!runner?.hasHandlers("after_provider_response")) return;
+		await runner.emit({
+			type: "after_provider_response",
+			status: response.status,
+			headers: response.headers,
+		});
+	};
 
-	agent = new Agent({
+	const agent = new Agent({
 		initialState: {
 			systemPrompt: "",
 			model,
 			thinkingLevel,
 			tools: [],
+			messages: existingSession.messages,
 		},
 		convertToLlm: convertToLlmWithBlockImages,
 		streamFn: async (model, context, options) => {
-			const providerRetrySettings = settingsManager.getProviderRetrySettings();
-			const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
-			// SDKs treat timeout=0 as 0ms (immediate timeout), not "no timeout".
-			// Use max int32 to effectively disable the timeout.
-			const effectiveTimeoutMs = httpIdleTimeoutMs === 0 ? 2147483647 : httpIdleTimeoutMs;
-			const timeoutMs = options?.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs;
-			const websocketConnectTimeoutMs =
-				options?.websocketConnectTimeoutMs ?? settingsManager.getWebSocketConnectTimeoutMs();
-			const headerRunner = extensionRunnerRef.current;
-			return modelRuntime.streamSimple(model, context, {
-				...options,
-				timeoutMs,
-				websocketConnectTimeoutMs,
-				maxRetries: options?.maxRetries ?? providerRetrySettings.maxRetries,
-				maxRetryDelayMs: options?.maxRetryDelayMs ?? providerRetrySettings.maxRetryDelayMs,
-				transformHeaders: async (requestHeaders) => {
-					const headers = mergeProviderAttributionHeaders(
-						model,
-						settingsManager,
-						options?.sessionId,
-						requestHeaders,
-					);
-					return headerRunner?.hasHandlers("before_provider_headers")
-						? headerRunner.emitBeforeProviderHeaders(headers ?? {})
-						: (headers ?? {});
-				},
-			});
-		},
-		onPayload: async (payload, _model) => {
-			const runner = extensionRunnerRef.current;
-			if (!runner?.hasHandlers("before_provider_request")) {
-				return payload;
+			const requestOptions = buildRequestOptions(model, options);
+			// Compaction and summaries use their own routing ids; only session requests
+			// replace the cache entry, so warming restarts from them. Keep warming while
+			// the current transcript still extends the request's prefix. Agent state may
+			// shallow-copy the messages array or refresh the model object without changing
+			// the provider request, so top-level object identity is not a valid cache key.
+			if (options?.sessionId === sessionManager.getSessionId()) {
+				cacheWarmer.start({ model, context, options: requestOptions }, cacheContextIsCurrent(model));
 			}
-			return runner.emitBeforeProviderRequest(payload);
+			return modelRuntime.streamSimple(model, context, requestOptions);
 		},
-		onResponse: async (response, _model) => {
-			const runner = extensionRunnerRef.current;
-			if (!runner?.hasHandlers("after_provider_response")) {
-				return;
-			}
-			await runner.emit({
-				type: "after_provider_response",
-				status: response.status,
-				headers: response.headers,
-			});
-		},
+		onPayload: transformProviderPayload,
+		onResponse: handleProviderResponse,
 		sessionId: sessionManager.getSessionId(),
 		transformContext: async (messages) => {
 			const runner = extensionRunnerRef.current;
@@ -354,9 +399,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		maxRetryDelayMs: settingsManager.getProviderRetrySettings().maxRetryDelayMs,
 	});
 
-	// Restore messages if session has existing data
+	// Restore missing settings metadata for older sessions.
 	if (hasExistingSession) {
-		agent.state.messages = existingSession.messages;
 		if (!hasThinkingEntry) {
 			sessionManager.appendThinkingLevelChange(thinkingLevel);
 		}
@@ -377,12 +421,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		resourceLoader,
 		customTools: options.customTools,
 		modelRuntime,
+		cacheWarmer,
 		initialActiveToolNames,
 		allowedToolNames,
 		excludedToolNames,
 		extensionRunnerRef,
 		sessionStartEvent: options.sessionStartEvent,
 	});
+
 	const extensionsResult = resourceLoader.getExtensions();
 
 	return {

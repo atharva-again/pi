@@ -41,6 +41,7 @@ describe("AgentSession work duration entries", () => {
 				systemPrompt: "Test",
 				tools: [],
 			},
+			streamFn: () => createAssistantMessageEventStream(),
 		});
 
 		sessionManager = SessionManager.inMemory();
@@ -72,7 +73,7 @@ describe("AgentSession work duration entries", () => {
 		const startedAt = new Date("2025-01-01T00:00:00.000Z").getTime();
 		vi.setSystemTime(startedAt);
 		const model = session.model!;
-		session.agent.streamFn = () => {
+		session.agent.streamFunction = () => {
 			const stream = createAssistantMessageEventStream();
 			void Promise.resolve().then(() => {
 				vi.setSystemTime(startedAt + 1500);
@@ -98,7 +99,7 @@ describe("AgentSession work duration entries", () => {
 		vi.setSystemTime(startedAt);
 		const model = session.model!;
 		let callCount = 0;
-		session.agent.streamFn = () => {
+		session.agent.streamFunction = () => {
 			callCount++;
 			const stream = createAssistantMessageEventStream();
 			void Promise.resolve().then(() => {

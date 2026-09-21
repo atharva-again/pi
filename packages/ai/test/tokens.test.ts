@@ -193,8 +193,16 @@ describe("Token Statistics on Abort", () => {
 		});
 	});
 
+	describe.skipIf(!process.env.BASETEN_API_KEY)("Baseten Provider", () => {
+		const llm = getModel("baseten", "zai-org/GLM-5.2");
+
+		it("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
+			await testTokensOnAbort(llm, { reasoningEffort: "high" });
+		});
+	});
+
 	describe.skipIf(!process.env.ZAI_API_KEY)("zAI Provider", () => {
-		const llm = getModel("zai", "glm-4.5-air");
+		const llm = getModel("zai", "glm-5.2");
 
 		it("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
 			await testTokensOnAbort(llm);
@@ -219,6 +227,14 @@ describe("Token Statistics on Abort", () => {
 
 	describe.skipIf(!process.env.KIMI_API_KEY)("Kimi For Coding Provider", () => {
 		const llm = getModel("kimi-coding", "kimi-for-coding");
+
+		it("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
+			await testTokensOnAbort(llm);
+		});
+	});
+
+	describe.skipIf(!process.env.META_API_KEY)("Meta Provider", () => {
+		const llm = getModel("meta", "muse-spark-1.3");
 
 		it("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
 			await testTokensOnAbort(llm);
@@ -272,6 +288,30 @@ describe("Token Statistics on Abort", () => {
 		// FIXME(xiaomi): see the API-billing block above — same upstream streaming
 		// usage limitation applies to Token Plan endpoints.
 		it.skip("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
+			await testTokensOnAbort(llm);
+		});
+	});
+
+	describe.skipIf(!process.env.QWEN_TOKEN_PLAN_API_KEY)("Qwen Token Plan Provider", () => {
+		const llm = getModel("qwen-token-plan", "qwen3.7-max");
+
+		it("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
+			await testTokensOnAbort(llm);
+		});
+	});
+
+	describe.skipIf(!process.env.QWEN_TOKEN_PLAN_API_KEY)("Qwen Token Plan Individual Provider", () => {
+		const llm = getModel("qwen-token-plan-individual", "qwen3.8-max");
+
+		it("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
+			await testTokensOnAbort(llm);
+		});
+	});
+
+	describe.skipIf(!process.env.QWEN_TOKEN_PLAN_CN_API_KEY)("Qwen Token Plan (CN) Provider", () => {
+		const llm = getModel("qwen-token-plan-cn", "qwen3.7-max");
+
+		it("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
 			await testTokensOnAbort(llm);
 		});
 	});

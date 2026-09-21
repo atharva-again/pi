@@ -294,7 +294,8 @@ user sends prompt ────────────────────�
   │   ┌─── turn (repeats while LLM calls tools) ───┐       │
   │   │                                            │       │
   │   ├─► turn_start                               │       │
-  │   ├─► context (can modify messages)            │       │
+  │   ├─► context (can modify conversation messages)   │
+  │   ├─► context_with_system (can modify the full transcript)
   │   ├─► before_provider_headers (can mutate headers)     |
   │   ├─► before_provider_request (can inspect or replace payload)
   │   ├─► after_provider_response (status + headers, before stream consume)
@@ -307,9 +308,13 @@ user sends prompt ────────────────────�
   │   │     └─► tool_execution_end                 │       │
   │   │                                            │       │
   │   └─► turn_end                                 │       │
+  │       └─► threshold compaction before a naturally required next turn
   │                                                        │
   ├─► agent_end                                            │
-  └─► agent_settled (no retry/compaction/follow-up left)   │
+  ├─► retry backoff or final-attempt recovery (when selected)
+  │   └─► fresh agent_start on successful recovery         │
+  ├─► agent_before_settle (can append entries and continue)│
+  └─► agent_settled (final, notification only)             │
                                                            │
 user sends another prompt ◄────────────────────────────────┘
 
@@ -330,7 +335,8 @@ user sends another prompt ◄─────────────────
 
 /compact or auto-compaction
   ├─► session_before_compact (can cancel or customize)
-  └─► session_compact
+  ├─► session_compact (success)
+  └─► session_compact_failed (failure or abort)
 
 /tree navigation
   ├─► session_before_tree (can cancel or customize)
@@ -448,7 +454,7 @@ pi.on("session_before_fork", async (event, ctx) => {
 After a successful fork or clone, pi emits `session_shutdown` for the old extension instance, reloads and rebinds extensions for the new session, then emits `session_start` with `reason: "fork"` and `previousSessionFile`.
 Do cleanup work in `session_shutdown`, then reestablish any in-memory state in `session_start`.
 
-#### session_before_compact / session_compact
+#### session_before_compact / session_compact / session_compact_failed
 
 Fired on compaction. See [compaction.md](compaction.md) for details.
 
@@ -468,6 +474,7 @@ pi.on("session_before_compact", async (event, ctx) => {
       summary: "...",
       firstKeptEntryId: preparation.firstKeptEntryId,
       tokensBefore: preparation.tokensBefore,
+      // usage: summaryResponse.usage, // Optional; included in session totals
     }
   };
 });
@@ -477,6 +484,14 @@ pi.on("session_compact", async (event, ctx) => {
   // event.fromExtension - whether extension provided it
   // event.reason - "manual" (/compact), "threshold", or "overflow"
   // event.willRetry - whether the aborted turn is retried after compaction (overflow recovery)
+});
+
+pi.on("session_compact_failed", async (event, ctx) => {
+  // event.reason - "manual" (/compact), "threshold", or "overflow"
+  // event.errorMessage - present for non-abort failures
+  // event.aborted - true for cancelled/aborted compactions
+  // event.willRetry - whether the aborted turn would have retried after compaction
+  // event.fromExtension - whether extension-provided compaction content was being used
 });
 ```
 
@@ -489,7 +504,13 @@ pi.on("session_before_tree", async (event, ctx) => {
   const { preparation, signal } = event;
   return { cancel: true };
   // OR provide custom summary:
-  return { summary: { summary: "...", details: {} } };
+  return {
+    summary: {
+      summary: "...",
+      // usage: summaryResponse.usage, // Optional; included in session totals
+      details: {},
+    },
+  };
 });
 
 pi.on("session_tree", async (event, ctx) => {
@@ -522,10 +543,13 @@ pi.on("before_agent_start", async (event, ctx) => {
   // event.systemPrompt - current chained system prompt for this handler
   //   (includes changes from earlier before_agent_start handlers)
   // event.systemPromptOptions - structured options used to build the system prompt
-  //   .customPrompt - any custom system prompt (from --system-prompt, SYSTEM.md, or custom templates)
+  //   .customPrompt - exact prompt prefix from --system-prompt, SYSTEM.md, or custom templates
+  //   .forceSystemPrompt - optional exact replacement for the complete prompt
   //   .selectedTools - tools currently active in the prompt
   //   .toolSnippets - one-line descriptions for each tool
-  //   .promptGuidelines - custom guideline bullets
+  //   .toolGuidelines - guideline bullets keyed by tool name
+  //   .promptGuidelines - additional custom guideline bullets
+  //   .sections - custom XML-wrapped sections keyed by tag name
   //   .appendSystemPrompt - text from --append-system-prompt flags
   //   .cwd - working directory
   //   .contextFiles - AGENTS.md files and other loaded context files
@@ -544,13 +568,13 @@ pi.on("before_agent_start", async (event, ctx) => {
 });
 ```
 
-The `systemPromptOptions` field gives extensions access to the same structured data Pi uses to build the system prompt. This lets you inspect what Pi has loaded — custom prompts, guidelines, tool snippets, context files, skills — without re-discovering resources or re-parsing flags. Use it when your extension needs to make deep, informed changes to the system prompt while respecting user-provided configuration.
+The `systemPromptOptions` field gives extensions access to the same structured data Pi uses to build the system prompt. Collections are mutable. Prefer changing `sections`, `selectedTools`, or `promptGuidelines`: Pi diffs the resulting prompt sections against what the model already has and appends one system message patching only the changed sections. Returning `systemPrompt`, or setting `forceSystemPrompt`, replaces the whole prompt for the run: every provider receives the forced text as its leading system prompt (a cache miss when it changes), and the session transcript keeps recording the structured sections. Tool selection changes update both the prompt contributions and executable provider tools; calling `pi.setActiveTools()` inside the handler has the same effect as editing `selectedTools`. Models that accept system messages mid-conversation receive the patch in place and keep their cached prefix; other models get the replayed prompt as their system prompt, which is a cache miss once per change.
 
 Inside `before_agent_start`, `event.systemPrompt` and `ctx.getSystemPrompt()` both reflect the chained system prompt as of the current handler. Later `before_agent_start` handlers can still modify it again.
 
-#### agent_start / agent_end / agent_settled
+#### agent_start / agent_end / agent_before_settle / agent_settled
 
-`agent_start` fires when a low-level agent run begins. `agent_end` fires when that run ends, but Pi may still auto-retry, auto-compact and retry, or continue with queued follow-up messages. Use `agent_settled` for status integrations that need to know Pi will not continue running automatically.
+`agent_start` fires when a low-level agent run begins. `agent_end` fires when that run ends, but Pi may still auto-retry, auto-compact and retry, or continue with queued follow-up messages. `agent_before_settle` is the final actionable boundary: it can append session entries and request one continuation. `agent_settled` is final and notification-only; use it for status integrations that need to know Pi will not continue running automatically.
 
 ```typescript
 pi.on("agent_start", async (_event, ctx) => {});
@@ -559,8 +583,43 @@ pi.on("agent_end", async (event, ctx) => {
   // event.messages - messages from this low-level run
 });
 
+let addedReviewReminder = false;
+pi.on("agent_before_settle", async (event, ctx) => {
+  if (addedReviewReminder) return;
+  addedReviewReminder = true;
+  return {
+    entries: [...event.entries, {
+      type: "custom_message",
+      customType: "review-reminder",
+      content: "Review the final diff before replying.",
+      display: false,
+    }],
+    continue: true,
+  };
+});
+
 pi.on("agent_settled", async (_event, ctx) => {
-  // ctx.isIdle() is true here unless another extension started a new run.
+  // ctx.isIdle() is true; runs requested here start after all settled handlers finish.
+});
+```
+
+If the run is aborted while `agent_before_settle` handlers are running, valid returned entries are still committed, but requested continuation is suppressed. Work requested from `agent_settled` is deferred until every settled handler completes, so notification dispatch is non-reentrant.
+
+#### ui_prompt_start / ui_prompt_end
+
+Notification-only lifecycle events for blocking user-facing extension UI prompts. They fire around `ctx.ui.select()`, `ctx.ui.confirm()`, `ctx.ui.input()`, `ctx.ui.editor()`, and `ctx.ui.custom()` so host/status integrations can report "waiting for user" instead of just "running".
+
+Nested or overlapping prompts are coalesced into one outer waiting span. Handlers are invoked best-effort and are not awaited before showing or closing the prompt.
+
+```typescript
+pi.on("ui_prompt_start", async (event, ctx) => {
+  // event.reason === "ui_prompt"
+  // event.kind: "select" | "confirm" | "input" | "editor" | "custom"
+  // event.title: prompt title when available
+});
+
+pi.on("ui_prompt_end", async (event, ctx) => {
+  // Pi is no longer waiting on that UI prompt span.
 });
 ```
 
@@ -573,10 +632,33 @@ pi.on("turn_start", async (event, ctx) => {
   // event.turnIndex, event.timestamp
 });
 
+let replacedResponse = false;
 pi.on("turn_end", async (event, ctx) => {
   // event.turnIndex, event.message, event.toolResults
+  // event.entries contains the structural entries proposed so far.
+  if (replacedResponse || event.outcome !== "completed" || event.toolResults.length > 0) return;
+  replacedResponse = true;
+  return {
+    entries: [
+      ...event.entries,
+      { type: "context_edit", targetId: event.messageEntryId, replacement: null },
+      {
+        type: "custom_message",
+        customType: "replacement-instruction",
+        content: "Answer again using the persisted user request.",
+        display: false,
+      },
+    ],
+    continue: true,
+  };
 });
 ```
+
+`turn_end` runs after the assistant and tool-result messages have been persisted and before the low-level `turn_end` event. Retry backoff and final-attempt recovery still happen after `agent_end`, preserving their existing lifecycle and queue ordering; `agent_before_settle` sees the repaired projection after that work completes. Boundary handlers run in extension load and registration order. Each handler sees prior proposals in `event.entries` and sees `event.context` rebuilt from them. Returning `entries` or `continue` replaces only that field; omitted fields preserve the current proposal. Allowed draft entry types are `custom`, `custom_message`, `context_edit`, and `compaction`. The complete proposal is validated before it is appended in list order after all handlers finish; a handler error is reported and later handlers still run. Validation prevents partially applied semantic errors, but persistence is not transactional.
+
+`continue: true` ensures one next provider request for that boundary invocation. If tool results, steering, or a follow-up already cause that request, they satisfy the decision and no additional request is made; otherwise Pi makes one context-only request. Error and aborted responses remain hard exits. `continue: false` never suppresses natural work. Guard continuation conditions: an unconditional `continue: true` is evaluated again after the next response and can create an endless loop. A `custom_message` draft contributes a user-role model message but is extension-authored: it does not run human input hooks, slash commands, skills, or prompt templates.
+
+Host integrations that construct `TurnEndEvent` values must now provide `messageEntryId`, `toolResultEntryIds`, `outcome`, `entries`, `continue`, and `context`. `ExtensionEvent` exhaustive switches must also handle `agent_before_settle`. `ExtensionRunner.emit()` excludes actionable turn boundaries; dispatch `turn_end` and `agent_before_settle` through `emitBoundary(baseEvent, buildContext)` so handlers receive chained previews. Other dedicated runner methods still return results for events such as `session_before_*`.
 
 #### message_start / message_update / message_end
 
@@ -644,11 +726,30 @@ Fired before each LLM call. Modify messages non-destructively. See [Session Form
 
 ```typescript
 pi.on("context", async (event, ctx) => {
-  // event.messages - deep copy, safe to modify
+  // event.messages - deep copy without system messages, safe to modify
   const filtered = event.messages.filter(m => !shouldPrune(m));
   return { messages: filtered };
 });
 ```
+
+`event.messages` holds the conversation without system messages. The prompt and tool declarations belong to Pi and are not part of this hook: when the handler returns a changed list, Pi replays the current prompt sections and tool declarations into one leading system message ahead of the returned messages. Filtering, windowing, or slicing from a compaction summary therefore cannot drop the prompt or the tools. An unchanged list keeps mid-conversation system messages in place, so models that accept them retain their cached prefix. System messages a handler adds are kept after Pi's head. To change the prompt or the tool set durably, use [`before_agent_start`](#before_agent_start) or `pi.setActiveTools()`; to edit system messages for one request, use [`context_with_system`](#context_with_system).
+
+#### context_with_system
+
+Fired before each LLM call, after every `context` handler has run and Pi has restored the prompt and tool state. `event.messages` is the full transcript, including the leading system message and any mid-conversation prompt or tool patches (see [Session Format](session-format.md#sessionmessageentry)). The returned messages are sent as they are: this hook owns the prompt and tool declarations for the request.
+
+```typescript
+import { getCurrentSystemMessage } from "@earendil-works/pi-ai";
+
+pi.on("context_with_system", async (event, ctx) => {
+  const cut = findCutIndex(event.messages);
+  // Fold the dropped prefix so its prompt and tool state survives as the new head.
+  const head = getCurrentSystemMessage(event.messages.slice(0, cut));
+  return { messages: head ? [head, ...event.messages.slice(cut)] : event.messages.slice(cut) };
+});
+```
+
+Rules: keep a system message at index 0 (providers read the prompt and initial tool declarations there; Pi reports an error if a handler drops it). Removing a system message removes the tool declarations and section patches it carries. Check your output with `getCurrentSystemPrompt()` and `getCurrentTools()` from `@earendil-works/pi-ai`. Handlers run in extension load order; a `systemPrompt` forced from `before_agent_start` is still projected onto the request afterwards.
 
 #### before_provider_headers
 
@@ -700,6 +801,25 @@ pi.on("after_provider_response", (event, ctx) => {
 ```
 
 Header availability depends on provider and transport. Providers that abstract HTTP responses may not expose headers.
+
+#### cache_warming_decision
+
+Fired before each prompt-cache refresh with pi's decision filled in. The event carries only pi's cost estimates; use `ctx.model`, `ctx.isIdle()`, and `ctx.getContextUsage()` for everything else.
+
+```typescript
+pi.on("cache_warming_decision", (event, ctx) => {
+  // event.warmCost: price of this refresh
+  // event.missCost: extra price of the next request if the entry is lost
+  // event.continuationProbability: pi's estimate that a request arrives in time
+  // event.action: "warm" | "stop", pi's decision
+
+  if (ctx.model?.provider === "my-provider") {
+    return { action: "stop" };
+  }
+});
+```
+
+Return `{ action: "warm" }` or `{ action: "stop" }` to override; the last handler that returns an action wins. `"stop"` ends warming until the next real request.
 
 ### Model Events
 
@@ -755,7 +875,8 @@ Behavior guarantees:
 - Mutations to `event.input` affect the actual tool execution
 - Later `tool_call` handlers see mutations made by earlier handlers
 - No re-validation is performed after your mutation
-- Return values from `tool_call` only control blocking via `{ block: true, reason?: string }`
+- Return values from `tool_call` control blocking via `{ block: true, reason?: string, terminate?: boolean }`
+- `terminate` only applies to a blocked call; the agent stops early only when every finalized result in the batch is terminating
 
 ```typescript
 import { isToolCallEventType } from "@earendil-works/pi-coding-agent";
@@ -771,7 +892,7 @@ pi.on("tool_call", async (event, ctx) => {
     event.input.command = `source ~/.profile\n${event.input.command}`;
 
     if (event.input.command.includes("rm -rf")) {
-      return { block: true, reason: "Dangerous command" };
+      return { block: true, reason: "Dangerous command", terminate: true };
     }
   }
 
@@ -813,7 +934,7 @@ In parallel tool mode, `tool_result` and `tool_execution_end` may interleave in 
 `tool_result` handlers chain like middleware:
 - Handlers run in extension load order
 - Each handler sees the latest result after previous handler changes
-- Handlers can return partial patches (`content`, `details`, or `isError`); omitted fields keep their current values
+- Handlers can return partial patches (`content`, `details`, `isError`, or `usage`); omitted fields keep their current values
 
 Use `ctx.signal` for nested async work inside the handler. This lets Esc cancel model calls, `fetch()`, and other abort-aware operations started by the extension.
 
@@ -822,7 +943,7 @@ import { isBashToolResult } from "@earendil-works/pi-coding-agent";
 
 pi.on("tool_result", async (event, ctx) => {
   // event.toolName, event.toolCallId, event.input
-  // event.content, event.details, event.isError
+  // event.content, event.details, event.isError, event.usage
 
   if (isBashToolResult(event)) {
     // event.details is typed as BashToolDetails
@@ -835,7 +956,7 @@ pi.on("tool_result", async (event, ctx) => {
   });
 
   // Modify result:
-  return { content: [...], details: {...}, isError: false };
+  return { content: [...], details: {...}, isError: false, usage: nestedModelUsage };
 });
 ```
 
@@ -870,6 +991,8 @@ pi.on("user_bash", (event, ctx) => {
   return { result: { output: "...", exitCode: 0, cancelled: false, truncated: false } };
 });
 ```
+
+Returning `undefined` continues to the next handler, then local execution if none handles the event. A valid result stops propagation: `operations` executes the command through the supplied backend, while `result` records the completed command without executing it.
 
 ### Input Events
 
@@ -975,9 +1098,17 @@ ctx.sessionManager.buildContextEntries()    // Active branch entries with compac
 ctx.sessionManager.getLeafId()              // Current leaf entry ID
 ```
 
-### ctx.modelRegistry / ctx.model
+### ctx.modelRegistry / ctx.model / ctx.thinkingLevel / ctx.scopedModels
 
-Access to models and API keys.
+Access to models, providers, and resolved authentication. `ctx.modelRegistry.getProvider(id)` returns the effective pi-ai provider, while `getProviderAuth(id)` resolves its current API key, headers, base URL, and provider-scoped environment without requiring a loaded model. `ctx.model` is the active model, and `ctx.thinkingLevel` is its current effective thinking level.
+
+`ctx.scopedModels` is the read-only list of models scoped to the current session — the same set the `/scoped-models` command shows. It is resolved at session start from the `--models` CLI flag and the `enabledModels` setting (matched against the available catalogue with minimatch on `provider/modelId` or a bare `modelId`). It is empty when no scoping is configured, meaning every available model is usable. Each entry is `{ model, thinkingLevel? }`, where `thinkingLevel` is set only when a pattern pinned it (e.g. `anthropic/*:high`). Use it to populate a model picker that mirrors the built-in one instead of enumerating the whole catalogue via `ctx.modelRegistry.getAvailable()`.
+
+#### Streaming model calls
+
+Use `ctx.modelRegistry.streamSimple(model, context, options)` for provider-neutral options such as `reasoning`, or `stream()` for API-specific options. Both use configured providers and resolve authentication, including for providers registered with `pi.registerProvider()`. Use these instead of `pi-ai/compat` streaming functions, which cannot see extension provider registrations.
+
+Both return an `AssistantMessageEventStream`. Iterate it for response events and await `.result()` for the final message. Setup failures produce error events and error results.
 
 ### ctx.signal
 
@@ -1082,7 +1213,7 @@ const options = ctx.getSystemPromptOptions();
 const contextPaths = options.contextFiles?.map((file) => file.path) ?? [];
 ```
 
-This has the same shape and mutability as `before_agent_start` `event.systemPromptOptions`: custom prompt, active tools, tool snippets, prompt guidelines, appended system prompt text, cwd, loaded context files, and loaded skills. It may include full context file contents, so treat it as sensitive extension-local data and avoid exposing it through command lists, logs, or autocomplete metadata.
+This has the same shape and mutability as `before_agent_start` `event.systemPromptOptions`: custom or forced prompt, active tools, tool snippets, per-tool and custom rules, custom sections, appended prompt text, cwd, loaded context files, and loaded skills. It may include full context file contents, so treat it as sensitive extension-local data and avoid exposing it through command lists, logs, or autocomplete metadata.
 
 This reports the current base prompt inputs. It does not include per-turn `before_agent_start` chained system-prompt changes, later `context` event message mutations, or `before_provider_request` payload rewrites.
 
@@ -1160,7 +1291,7 @@ Options:
 
 ### ctx.navigateTree(targetId, options?)
 
-Navigate to a different point in the session tree:
+Navigate to a different point in the session tree. Rejects while an agent response, manual or automatic compaction, or another tree navigation is active, even with `summarize: false`. These conflicts leave the active branch unchanged and reject the promise rather than returning `{ cancelled: true }`. Wait for the active operation to finish (for example, with `await ctx.waitForIdle()` in a command handler) and retry:
 
 ```typescript
 const result = await ctx.navigateTree("entry-id-456", {
@@ -1323,7 +1454,16 @@ export default function (pi: ExtensionAPI) {
 
 ### pi.on(event, handler)
 
-Subscribe to events. See [Events](#events) for event types and return values.
+Subscribe to events. Returns an unsubscribe function that removes only that registration. See [Events](#events) for event types and return values.
+
+```typescript
+const unsubscribe = pi.on("agent_end", async (event) => {
+  unsubscribe();
+  await updateIntegration(event.messages);
+});
+```
+
+Handlers run in extension load order, then registration order within each extension. Adding or removing a handler does not affect a dispatch already in progress.
 
 ### pi.registerTool(definition)
 
@@ -1416,12 +1556,16 @@ pi.sendUserMessage([
 // During streaming - must specify delivery mode
 pi.sendUserMessage("Focus on error handling", { deliverAs: "steer" });
 pi.sendUserMessage("And then summarize", { deliverAs: "followUp" });
+
+// Opt in to extension command dispatch and skill/prompt template expansion
+pi.sendUserMessage("/review src/index.ts", { expandPromptTemplates: true });
 ```
 
 **Options:**
 - `deliverAs` - Required when agent is streaming:
   - `"steer"` - Queues the message for delivery after the current assistant turn finishes executing its tool calls
   - `"followUp"` - Waits for agent to finish all tools
+- `expandPromptTemplates` - Dispatch extension commands and expand skill commands and prompt templates. Defaults to `false`.
 
 When not streaming, the message is sent immediately and triggers a new turn. When streaming without `deliverAs`, throws an error.
 
@@ -1553,6 +1697,27 @@ mode and would not execute if sent via `prompt`.
 
 Register a custom TUI renderer for custom messages with your `customType`. Custom messages are created with `pi.sendMessage()` and participate in LLM context. See [Custom UI](#custom-ui).
 
+### pi.registerMarkdownTransformer(transformer)
+
+Register a transformer for the Markdown in normal user text, assistant text, and thinking blocks. Transformers run in extension load order, and each transformer receives the Markdown returned by the previous transformer. After the chain finishes, Pi renders the transformed content with its built-in renderer.
+
+The transformer receives the Markdown string and a context with:
+
+- `messageType` — `"user"`, `"assistant"`, or `"assistant-thinking"`
+- `isStreaming` — `true` for partial assistant updates; `false` for user, finalized assistant, and restored messages
+- `availableWidth` — exact terminal columns available for the transformed Markdown content
+
+Return the transformed Markdown:
+
+```typescript
+pi.registerMarkdownTransformer((markdown, { messageType, isStreaming }) => {
+  if (isStreaming || messageType === "assistant-thinking") return markdown;
+  return markdown.replaceAll("-->", "→");
+});
+```
+
+If a transformer throws, Pi keeps the Markdown produced so far and continues with the next transformer. The hook is display-only: the original message remains unchanged in the session and model context. It runs for new user messages, assistant streaming updates, restored session messages, and terminal width changes, so transformers should remain synchronous and inexpensive.
+
 ### pi.registerEntryRenderer(customType, renderer)
 
 Register a custom TUI renderer for custom entries with your `customType`. Custom entries are created with `pi.appendEntry()` and do not participate in LLM context.
@@ -1641,7 +1806,7 @@ Typical `sourceInfo.source` values:
 
 ### pi.setModel(model)
 
-Set the current model. Returns `false` if no API key is available for the model. See [models.md](models.md) for configuring custom models.
+Set the model for the current session. The change is recorded in session history and restored when that session is resumed, but it does not change the configured `defaultProvider` or `defaultModel` used by new sessions. Returns `false` if authentication is not configured for the model's provider. See [models.md](models.md) for configuring custom models.
 
 ```typescript
 const model = ctx.modelRegistry.find("anthropic", "claude-sonnet-4-5");
@@ -1655,7 +1820,9 @@ if (model) {
 
 ### pi.getThinkingLevel() / pi.setThinkingLevel(level)
 
-Get or set the thinking level. Level is clamped to model capabilities (non-reasoning models always use "off"). Changes emit `thinking_level_select`.
+Get the current thinking level. Level is clamped to model capabilities (non-reasoning models always use "off"). Changes emit `thinking_level_select`.
+
+`pi.setThinkingLevel()` changes the thinking level for the current session. The change is recorded in session history and restored when that session is resumed, but it does not change the configured default used by new sessions.
 
 ```typescript
 const current = pi.getThinkingLevel();  // "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max"
@@ -1677,9 +1844,41 @@ Register or override a model provider dynamically. Useful for proxies, custom en
 
 Calls made during the extension factory function are queued and applied once the runner initialises. Calls made after that — for example from a command handler following a user setup flow — take effect immediately without requiring a `/reload`.
 
-Dynamic providers can implement `refreshModels`. Pi calls it during model refresh, publishes the returned list synchronously through the provider, and passes the canonical credential/store/network/signal context. The extension decides whether to persist the catalog through `context.store`; live servers such as llama.cpp can ignore it.
+Dynamic providers can implement `refreshModels`. Pi calls it during model refresh, publishes the returned list synchronously through the provider, and passes the canonical credential/stored-catalog/network/signal context. The extension decides whether to persist catalog metadata through generation-checked `context.publish({ persist: entry })`; live servers such as llama.cpp can return models without persisting them.
+
+`context.signal` is always a concrete signal and provider callbacks must pass it to blocking I/O. Public `ModelRuntime.refresh()` and `ModelRegistry.refresh()` calls accept an optional signal and are unbounded when it is omitted; extensions and applications choose their own deadlines. Cancellation stops the caller waiting even if a provider ignores the signal, but cooperation is still required to stop the underlying work.
+
+Extensions that need native provider auth, filtering, refresh, or stream behavior can register a complete `Provider` from `@earendil-works/pi-ai`. The provider becomes the composition base and `models.json` overrides still apply above it.
 
 ```typescript
+import { createProvider, openAICompletionsApi } from "@earendil-works/pi-ai";
+
+const provider = createProvider({
+  id: "local-server",
+  name: "Local Server",
+  baseUrl: "http://localhost:8080/v1",
+  auth: {
+    apiKey: {
+      name: "Local server setup",
+      async login(interaction) {
+        return {
+          type: "api_key",
+          key: await interaction.prompt({ type: "secret", message: "API key" }),
+        };
+      },
+      async resolve({ credential }) {
+        return credential?.key
+          ? { auth: { apiKey: credential.key }, source: "stored API key" }
+          : undefined;
+      },
+    },
+  },
+  models: [],
+  api: openAICompletionsApi(),
+});
+
+pi.registerProvider(provider);
+
 // Register a new provider with custom models
 pi.registerProvider("my-proxy", {
   name: "My Proxy",
@@ -1737,7 +1936,8 @@ pi.registerProvider("corporate-ai", {
       const code = await callbacks.onPrompt({ message: "Enter code:" });
       return { refresh: code, access: code, expires: Date.now() + 3600000 };
     },
-    async refreshToken(credentials) {
+    async refreshToken(credentials, signal) {
+      signal.throwIfAborted();
       // Refresh logic
       return credentials;
     },
@@ -1748,7 +1948,9 @@ pi.registerProvider("corporate-ai", {
 });
 ```
 
-**Config options:**
+The object form accepts a complete pi-ai `Provider`, including native `auth`, `getModels`, `refreshModels`, `filterModels`, `stream`, and `streamSimple` behavior.
+
+**Legacy config options:**
 - `name` - Display name for the provider in UI such as `/login`.
 - `baseUrl` - API endpoint URL. Required when defining models.
 - `apiKey` - API key literal, environment interpolation (`$ENV_VAR` or `${ENV_VAR}`), or leading `!command`. Required when defining models (unless `oauth` provided). `$$` escapes `$`, and `$!` escapes a literal `!` without triggering command execution.
@@ -1756,7 +1958,7 @@ pi.registerProvider("corporate-ai", {
 - `headers` - Custom headers to include in requests.
 - `authHeader` - If true, adds `Authorization: Bearer` header automatically.
 - `models` - Array of model definitions. If provided, replaces all existing models for this provider. Model definitions can set `baseUrl` to override the provider endpoint for that model.
-- `refreshModels` - Async dynamic discovery callback. Its returned models replace extension-provided models. Use the scoped `context.store` only when results should persist.
+- `refreshModels` - Async dynamic discovery callback. Its returned models replace extension-provided models. `context.stored` contains the persisted provider snapshot; use generation-checked `context.publish({ persist: entry })` only when updated catalog data should persist. Use `persist: null` to delete that snapshot.
 - `oauth` - OAuth provider config for `/login` support. When provided, the provider appears in the login menu.
 - `streamSimple` - Custom streaming implementation for non-standard APIs.
 
@@ -1900,6 +2102,7 @@ pi.registerTool({
     return {
       content: [{ type: "text", text: "Done" }],  // Sent to LLM
       details: { data: result },                   // For rendering & state
+      // usage: nestedModelResponse.usage,          // Optional nested LLM usage
       // Optional: stop after this tool batch when every finalized tool result
       // in the batch also returns terminate: true.
       terminate: true,
@@ -1911,6 +2114,8 @@ pi.registerTool({
   renderResult(result, options, theme, context) { ... },
 });
 ```
+
+**Usage accounting:** If a tool makes nested LLM calls, return their combined `Usage` as `usage`. Pi persists it on the tool result and includes it in footer, `/session`, and RPC session totals. `tool_result` handlers can inspect or replace this value.
 
 **Signaling errors:** To mark a tool execution as failed (sets `isError: true` on the result and reports it to the LLM), throw an error from `execute`. Returning a value never sets the error flag regardless of what properties you include in the return object.
 
@@ -1977,7 +2182,7 @@ pi.registerTool({
 
 ### Overriding Built-in Tools
 
-Extensions can override built-in tools (`read`, `bash`, `edit`, `write`, `grep`, `find`, `ls`) by registering a tool with the same name. Interactive mode displays a warning when this happens.
+Extensions can override built-in tools (`read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, `ls`) by registering a tool with the same name. Interactive mode displays a warning when this happens.
 
 ```bash
 # Extension's read tool replaces built-in read
@@ -1999,13 +2204,14 @@ See [examples/extensions/tool-override.ts](../examples/extensions/tool-override.
 **Your implementation must match the exact result shape**, including the `details` type. The UI and session logic depend on these shapes for rendering and state tracking.
 
 Built-in tool implementations:
-- [read.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/read.ts) - `ReadToolDetails`
-- [bash.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/bash.ts) - `BashToolDetails`
-- [edit.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/edit.ts)
-- [write.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/write.ts)
-- [grep.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/grep.ts) - `GrepToolDetails`
-- [find.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/find.ts) - `FindToolDetails`
-- [ls.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/core/tools/ls.ts) - `LsToolDetails`
+- [read.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/read.ts) - `ReadToolDetails`
+- [bash.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/bash.ts) - `BashToolDetails`
+- [powershell.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/powershell.ts) - `PowerShellToolDetails`
+- [edit.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/edit.ts)
+- [write.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/write.ts)
+- [grep.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/grep.ts) - `GrepToolDetails`
+- [find.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/find.ts) - `FindToolDetails`
+- [ls.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/core/tools/ls.ts) - `LsToolDetails`
 
 ### Remote Execution
 
@@ -2036,11 +2242,11 @@ pi.registerTool({
 });
 ```
 
-**Operations interfaces:** `ReadOperations`, `WriteOperations`, `EditOperations`, `BashOperations`, `LsOperations`, `GrepOperations`, `FindOperations`
+**Operations interfaces:** `ReadOperations`, `WriteOperations`, `EditOperations`, `BashOperations`, `PowerShellOperations`, `LsOperations`, `GrepOperations`, `FindOperations`
 
 For `user_bash`, extensions can reuse pi's local shell backend via `createLocalBashOperations()` instead of reimplementing local process spawning, shell resolution, and process-tree termination.
 
-The bash tool also supports a spawn hook to adjust the command, cwd, or env before execution:
+The `bash` and `powershell` tools also support a spawn hook to adjust the command, cwd, or env before execution:
 
 ```typescript
 import { createBashTool } from "@earendil-works/pi-coding-agent";
@@ -2054,7 +2260,15 @@ const bashTool = createBashTool(cwd, {
 });
 ```
 
-See [examples/extensions/ssh.ts](../examples/extensions/ssh.ts) for a complete SSH example with `--ssh` flag.
+`createBashTool()` and `createPowerShellTool()` expose the current session to commands through `PI_SESSION_ID`, `PI_SESSION_FILE`, `PI_PROVIDER`, `PI_MODEL`, and `PI_REASONING_LEVEL`. Injection happens before `spawnHook`, so hooks receive these values in `env` and preserve them when they spread the existing environment as above. Set `exposeSessionEnvironment: false` to disable them:
+
+```typescript
+const bashTool = createBashTool(cwd, {
+  exposeSessionEnvironment: false,
+});
+```
+
+See [Shell tool session environment](environment-variables.md#shell-tool-session-environment) for variable semantics. See [examples/extensions/ssh.ts](../examples/extensions/ssh.ts) for a complete SSH example with `--ssh` flag.
 
 ### Output Truncation
 
@@ -2128,7 +2342,7 @@ export default function (pi: ExtensionAPI) {
 
 ### Custom Rendering
 
-Tools can provide `renderCall` and `renderResult` for custom TUI display. See [tui.md](tui.md) for the full component API and [tool-execution.ts](https://github.com/earendil-works/pi-mono/blob/main/packages/coding-agent/src/modes/interactive/components/tool-execution.ts) for how tool rows are composed.
+Tools can provide `renderCall` and `renderResult` for custom TUI display. See [tui.md](tui.md) for the full component API and [tool-execution.ts](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/modes/interactive/components/tool-execution.ts) for how tool rows are composed.
 
 By default, tool output is wrapped in a `Box` that handles padding and background. A defined `renderCall` or `renderResult` must return a `Component`. If a slot renderer is not defined, `tool-execution.ts` uses fallback rendering for that slot.
 
@@ -2253,38 +2467,13 @@ If a slot renderer is not defined or throws:
 
 ### Dynamic Tool Loading
 
-Extensions can register many tools while keeping only a small initial set active. A tool can then add more tools with `pi.setActiveTools()` during execution. Pi detects purely additive changes, records the newly available tool names on that tool result, and applies the updated active set before the next model request.
-
-This works with every model. Models with native deferred-loading support preserve the stable prompt prefix and load the new definitions at the tool-result position. Other models use the fallback described below.
+Extensions can register many tools while keeping only a small initial set active. A tool can then change the active set with `pi.setActiveTools()` during execution. Pi stores the initial prompt and tool loadout in the transcript's first system message, then appends tool and prompt deltas before the next model request. Providers that cannot represent a transition receive a complete transcript checkpoint, which may invalidate the cached prefix.
 
 The lifecycle is:
 
 1. Register every tool with `pi.registerTool()` so it appears in `pi.getAllTools()`.
 2. Keep loader tools, such as `search_tools`, active and leave searchable tools inactive.
-3. During loader execution, call `pi.setActiveTools([...currentTools, ...matchingTools])`. The change must be additive: do not remove currently active tools in the same call.
-4. Pi records which tools were added on the loader's tool result.
-5. Before the next model response, Pi exposes the added definitions using native deferred loading when supported, or the normal active tool list otherwise.
-
-You do not need to return provider-specific tool references or mark the loader as a special search tool. The active-tool change is the signal. Names passed to `pi.setActiveTools()` must already be registered; unknown names are ignored.
-
-#### Models with native deferred loading
-
-- **Anthropic**
-  - **Models:** Sonnet, Opus, Fable version 4.5 or newer (without Haiku)
-  - **Native representation:** Deferred definitions use `defer_loading`; the load point uses `tool_reference` content.
-- **OpenAI**
-  - **Models:** `gpt-5.4` and newer family
-  - **Native representation:** Pi adds completed client `tool_search_call` and `tool_search_output` items at the load point.
-
-For a verified custom model or proxy, native handling can be enabled with `compat.supportsToolReferences: true` for `anthropic-messages`, or `compat.supportsToolSearch: true` for `openai-responses` and `openai-codex-responses`. Leave these disabled unless the endpoint and model accept the corresponding native protocol.
-
-#### Fallback behavior
-
-For all other models and providers, dynamic activation still works: Pi sends the complete current active tool list normally on the next request. The model can call the newly activated tools, but adding their definitions may invalidate the provider's cached prompt prefix.
-
-Pi also uses this safe fallback when the active set is not purely additive, such as replacing one group of tools with another. Tool removals therefore work, but they do not use deferred loading.
-
-For the best cache behavior, keep the loader tool active for the whole session and add tools instead of replacing the active set. Also note that activating a tool with `promptSnippet` or `promptGuidelines` rebuilds the system prompt; that system-prompt change can invalidate the prefix even when the provider supports deferred schemas. Lazily loaded tools should usually rely on their tool `description` and omit active-only prompt metadata.
+3. During loader execution, call `pi.setActiveTools()` with the desired active tool names. Names must already be registered; unknown names are ignored.
 
 #### Search tool example
 
@@ -2386,7 +2575,7 @@ export default function (pi: ExtensionAPI) {
 }
 ```
 
-When `search_tools` adds a match, the model receives that definition on the immediately following request. On a native-capable model the definition is anchored after the search result without changing the initial tool-schema prefix. On other models it appears in the normal tool list on that same following request.
+When `search_tools` adds a match, the model receives the complete updated tool list on the immediately following request.
 
 ## Custom UI
 
@@ -2708,8 +2897,8 @@ class VimEditor extends CustomEditor {
 
 export default function (pi: ExtensionAPI) {
   pi.on("session_start", (_event, ctx) => {
-    ctx.ui.setEditorComponent((_tui, theme, keybindings) =>
-      new VimEditor(theme, keybindings)
+    ctx.ui.setEditorComponent((tui, theme, keybindings) =>
+      new VimEditor(tui, theme, keybindings)
     );
   });
 }
@@ -2718,7 +2907,8 @@ export default function (pi: ExtensionAPI) {
 **Key points:**
 - Extend `CustomEditor` (not base `Editor`) to get app keybindings (escape to abort, ctrl+d, model switching)
 - Call `super.handleInput(data)` for keys you don't handle
-- Factory receives `theme` and `keybindings` from the app
+- Custom editors keep the standalone working row by default. Pass `{ embedWorkingStatus: true }` as the fourth `CustomEditor` constructor argument to use the built-in editor-border spinner instead.
+- Factory receives `tui`, `theme`, and `keybindings` from the app
 - Use `ctx.ui.getEditorComponent()` before `setEditorComponent()` to wrap the previously configured custom editor
 - Pass `undefined` to restore default: `ctx.ui.setEditorComponent(undefined)`
 
@@ -2741,7 +2931,7 @@ Register a custom renderer for messages with your `customType`. Use message rend
 import { Text } from "@earendil-works/pi-tui";
 
 pi.registerMessageRenderer("my-extension", (message, options, theme) => {
-  const { expanded } = options;
+  const { expanded, outputPad } = options;
   let text = theme.fg("accent", `[${message.customType}] `);
   text += message.content;
 
@@ -2749,7 +2939,7 @@ pi.registerMessageRenderer("my-extension", (message, options, theme) => {
     text += "\n" + theme.fg("dim", JSON.stringify(message.details, null, 2));
   }
 
-  return new Text(text, 0, 0);
+  return new Text(text, outputPad, 0);
 });
 ```
 

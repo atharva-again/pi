@@ -1459,7 +1459,13 @@ Instructions:
 
 		if (action === "returnAndSummarize") {
 			if (!ctx.ui.getEditorText().trim()) {
-				ctx.ui.setEditorText("Act on the review findings");
+				ctx.ui.setEditorText(`From this review, analyze each finding:
+
+1. Determine whether it was introduced by the changes in this branch, existed beforehand, or cannot be determined.
+2. Determine whether addressing it would constitute scope creep for this branch.
+3. If it pre-existed and is not scope creep, describe the viable solutions, including the pros and cons of each, and recommend one.
+
+Clearly distinguish evidence from assumptions.`);
 			}
 			if (notifySuccess) {
 				ctx.ui.notify("Review complete! Returned and summarized.", "info");

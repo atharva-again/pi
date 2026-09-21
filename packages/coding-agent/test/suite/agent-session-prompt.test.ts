@@ -4,18 +4,32 @@ import { join } from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { fauxAssistantMessage, fauxToolCall, type Model } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
-import { afterEach, describe, expect, it } from "vitest";
-import type { InputEvent } from "../../src/core/extensions/index.ts";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import type { ExtensionAPI, InputEvent } from "../../src/core/extensions/index.ts";
 import type { PromptTemplate } from "../../src/core/prompt-templates.ts";
 import { createSyntheticSourceInfo } from "../../src/core/source-info.ts";
 import { createTestResourceLoader } from "../utilities.ts";
 import { createHarness, getMessageText, type Harness } from "./harness.ts";
+
+const processImage = vi.hoisted(() =>
+	vi.fn(async (_bytes: Uint8Array, mimeType: string) => ({
+		ok: true as const,
+		data: Buffer.from("normalized").toString("base64"),
+		mimeType,
+		hints: [],
+	})),
+);
+vi.mock("../../src/utils/image-process.ts", () => ({ processImage }));
+
+const TINY_PNG_BASE64 =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFBQIAX8jx0gAAAABJRU5ErkJggg==";
 
 describe("AgentSession prompt characterization", () => {
 	const harnesses: Harness[] = [];
 	const tempDirs: string[] = [];
 
 	afterEach(() => {
+		processImage.mockClear();
 		while (harnesses.length > 0) {
 			harnesses.pop()?.cleanup();
 		}
@@ -35,8 +49,8 @@ describe("AgentSession prompt characterization", () => {
 
 		await harness.session.prompt("hi");
 
-		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
-		expect(getMessageText(harness.session.messages[0]!)).toBe("hi");
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["system", "user", "assistant"]);
+		expect(getMessageText(harness.session.messages[1]!)).toBe("hi");
 		expect(harness.getPendingResponseCount()).toBe(0);
 	});
 
@@ -68,13 +82,14 @@ describe("AgentSession prompt characterization", () => {
 
 		expect(toolRuns).toEqual(["hello"]);
 		expect(harness.session.messages.map((message) => message.role)).toEqual([
+			"system",
 			"user",
 			"assistant",
 			"toolResult",
 			"assistant",
 		]);
-		expect(harness.session.messages[2]?.role).toBe("toolResult");
-		expect(harness.session.messages[3]?.role).toBe("assistant");
+		expect(harness.session.messages[3]?.role).toBe("toolResult");
+		expect(harness.session.messages[4]?.role).toBe("assistant");
 	});
 
 	it("executes multiple tool calls from one response and continues with a single follow-up response", async () => {
@@ -142,6 +157,44 @@ describe("AgentSession prompt characterization", () => {
 		});
 
 		expect(sawImage).toBe(true);
+	});
+
+	// Regression test for https://github.com/earendil-works/pi/issues/9631
+	it("uses the model selected by before_agent_start for image normalization", async () => {
+		let strictModel: Model<string> | undefined;
+		const harness = await createHarness({
+			models: [{ id: "wide" }, { id: "strict" }],
+			extensionFactories: [
+				(pi) => {
+					pi.on("before_agent_start", async () => {
+						if (!strictModel) throw new Error("Expected strict model");
+						await pi.setModel(strictModel);
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		strictModel = harness.getModel("strict");
+		if (!strictModel) throw new Error("Expected strict model");
+		const resizeOptions = { maxWidth: 1000, maxHeight: 1000, maxBytes: 500000, jpegQuality: 70 };
+		strictModel.inputLimits = { images: { resize: resizeOptions } };
+		harness.setResponses([fauxAssistantMessage("done")]);
+
+		await harness.session.prompt("inspect", {
+			images: [{ type: "image", data: TINY_PNG_BASE64, mimeType: "image/png" }],
+		});
+
+		expect(harness.session.model?.id).toBe("strict");
+		expect(processImage).toHaveBeenCalledWith(expect.any(Uint8Array), "image/png", {
+			autoResizeImages: true,
+			resizeOptions,
+		});
+		const userMessage = harness.session.messages.find((message) => message.role === "user");
+		expect(userMessage?.content).toContainEqual({
+			type: "image",
+			data: Buffer.from("normalized").toString("base64"),
+			mimeType: "image/png",
+		});
 	});
 
 	it("expands skill commands before sending the prompt", async () => {
@@ -224,6 +277,39 @@ describe("AgentSession prompt characterization", () => {
 		expect(expandedPrompt).toBe("Review this code: src/index.ts");
 	});
 
+	it("sendUserMessage can opt into prompt template expansion", async () => {
+		const template: PromptTemplate = {
+			name: "review",
+			description: "Review template",
+			content: "Review this code: $1",
+			filePath: "/virtual/review.md",
+			sourceInfo: createSyntheticSourceInfo("/virtual/review.md", {
+				source: "local",
+				scope: "temporary",
+				origin: "top-level",
+			}),
+		};
+		const resourceLoader = {
+			...createTestResourceLoader(),
+			getPrompts: () => ({ prompts: [template], diagnostics: [] }),
+		};
+		const harness = await createHarness({ resourceLoader });
+		harnesses.push(harness);
+		let expandedPrompt = "";
+
+		harness.setResponses([
+			(context) => {
+				const user = context.messages.find((message) => message.role === "user");
+				expandedPrompt = user ? getMessageText(user) : "";
+				return fauxAssistantMessage("ok");
+			},
+		]);
+
+		await harness.session.sendUserMessage("/review src/index.ts", { expandPromptTemplates: true });
+
+		expect(expandedPrompt).toBe("Review this code: src/index.ts");
+	});
+
 	it("dispatches extension commands without consuming a provider response", async () => {
 		const commandRuns: string[] = [];
 		const harness = await createHarness({
@@ -248,6 +334,35 @@ describe("AgentSession prompt characterization", () => {
 		expect(harness.getPendingResponseCount()).toBe(1);
 	});
 
+	it("extension sendUserMessage can opt into extension command dispatch", async () => {
+		let extensionApi: ExtensionAPI | undefined;
+		let resolveCommandRun: (args: string) => void = () => {};
+		const commandRun = new Promise<string>((resolve) => {
+			resolveCommandRun = resolve;
+		});
+		const harness = await createHarness({
+			extensionFactories: [
+				(pi) => {
+					extensionApi = pi;
+					pi.registerCommand("testcmd", {
+						description: "Test command",
+						handler: async (args) => {
+							resolveCommandRun(args);
+						},
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		expect(extensionApi).toBeDefined();
+
+		extensionApi?.sendUserMessage("/testcmd hello world", { expandPromptTemplates: true });
+
+		await expect(commandRun).resolves.toBe("hello world");
+		expect(harness.session.messages).toEqual([]);
+		expect(harness.getPendingResponseCount()).toBe(0);
+	});
+
 	it("sendUserMessage while idle triggers a turn", async () => {
 		const harness = await createHarness();
 		harnesses.push(harness);
@@ -256,8 +371,8 @@ describe("AgentSession prompt characterization", () => {
 
 		await harness.session.sendUserMessage("from extension");
 
-		expect(harness.session.messages.map((message) => message.role)).toEqual(["user", "assistant"]);
-		expect(getMessageText(harness.session.messages[0]!)).toBe("from extension");
+		expect(harness.session.messages.map((message) => message.role)).toEqual(["system", "user", "assistant"]);
+		expect(getMessageText(harness.session.messages[1]!)).toBe("from extension");
 	});
 
 	it("does not report streamingBehavior to input handlers while idle", async () => {
@@ -377,6 +492,52 @@ describe("AgentSession prompt characterization", () => {
 
 		releaseToolExecution?.();
 		await promptPromise;
+	});
+
+	it("throws when prompted during manual compaction", async () => {
+		let markCompactionStarted = () => {};
+		const compactionStarted = new Promise<void>((resolve) => {
+			markCompactionStarted = resolve;
+		});
+		let releaseCompaction = () => {};
+		const compactionReleased = new Promise<void>((resolve) => {
+			releaseCompaction = resolve;
+		});
+		const harness = await createHarness({
+			settings: { compaction: { keepRecentTokens: 1 } },
+			extensionFactories: [
+				(pi) => {
+					pi.on("session_before_compact", async (event) => {
+						markCompactionStarted();
+						await compactionReleased;
+						return {
+							compaction: {
+								summary: "manual compacted",
+								firstKeptEntryId: event.preparation.firstKeptEntryId,
+								tokensBefore: event.preparation.tokensBefore,
+								details: {},
+							},
+						};
+					});
+				},
+			],
+		});
+		harnesses.push(harness);
+		harness.setResponses([fauxAssistantMessage("one"), fauxAssistantMessage("two")]);
+		await harness.session.prompt("first");
+		await harness.session.prompt("second");
+
+		const compactPromise = harness.session.compact();
+		await compactionStarted;
+
+		try {
+			await expect(harness.session.prompt("third")).rejects.toThrow(
+				"Cannot submit a prompt while compaction is in progress. Wait for compaction to finish and retry.",
+			);
+		} finally {
+			releaseCompaction();
+			await compactPromise;
+		}
 	});
 
 	it("throws when prompting without a model", async () => {

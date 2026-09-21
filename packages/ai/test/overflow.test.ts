@@ -1,13 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { AssistantMessage } from "../src/types.ts";
-import { isContextOverflow } from "../src/utils/overflow.ts";
+import { isContextOverflow, isRecoverableLength } from "../src/utils/overflow.ts";
 
-function createErrorMessage(errorMessage: string): AssistantMessage {
+function createErrorMessage(errorMessage: string, provider = "ollama"): AssistantMessage {
 	return {
 		role: "assistant",
 		content: [],
 		api: "openai-completions",
-		provider: "ollama",
+		provider,
 		model: "qwen3.5:35b",
 		usage: {
 			input: 0,
@@ -33,6 +33,12 @@ describe("isContextOverflow", () => {
 	it("detects explicit Ollama prompt-too-long errors", () => {
 		const message = createErrorMessage("400 `prompt too long; exceeded max context length by 100918 tokens`");
 		expect(isContextOverflow(message, 32768)).toBe(true);
+	});
+
+	it("detects z.ai prompt-too-long errors", () => {
+		// Regression for #9805.
+		const message = createErrorMessage('400 {"code":"1261","message":"Prompt too long"}', "zai");
+		expect(isContextOverflow(message, 1048576)).toBe(true);
 	});
 
 	it("detects Together AI context length errors", () => {
@@ -80,6 +86,14 @@ describe("isContextOverflow", () => {
 		expect(isContextOverflow(message, 32768)).toBe(false);
 	});
 
+	it("only treats bodyless 400 and 413 errors as overflow for Cerebras", () => {
+		// Regression for #9482.
+		for (const errorMessage of ["400 status code (no body)", "413 status code (no body)"]) {
+			expect(isContextOverflow(createErrorMessage(errorMessage, "cerebras"), 131072)).toBe(true);
+			expect(isContextOverflow(createErrorMessage(errorMessage, "opencode-go"), 1000000)).toBe(false);
+		}
+	});
+
 	it("does not treat Bedrock throttling 'Too many tokens' as overflow", () => {
 		// Bedrock returns this for HTTP 429 rate limiting, NOT context overflow.
 		// formatBedrockError uses a human-readable prefix for ThrottlingException.
@@ -102,19 +116,28 @@ describe("isContextOverflow", () => {
 		expect(isContextOverflow(message, 200000)).toBe(false);
 	});
 
-	function createLengthStopMessage(input: number, cacheRead: number, output: number): AssistantMessage {
+	function createLengthStopMessage(options: {
+		input: number;
+		cacheRead: number;
+		output: number;
+		cacheWrite?: number;
+		api?: AssistantMessage["api"];
+		provider?: string;
+		model?: string;
+	}): AssistantMessage {
+		const cacheWrite = options.cacheWrite ?? 0;
 		return {
 			role: "assistant",
 			content: [],
-			api: "openai-completions",
-			provider: "xiaomi",
-			model: "mimo-v2.5-pro",
+			api: options.api ?? "openai-completions",
+			provider: options.provider ?? "test-provider",
+			model: options.model ?? "test-model",
 			usage: {
-				input,
-				output,
-				cacheRead,
-				cacheWrite: 0,
-				totalTokens: input + cacheRead + output,
+				input: options.input,
+				output: options.output,
+				cacheRead: options.cacheRead,
+				cacheWrite,
+				totalTokens: options.input + options.cacheRead + cacheWrite + options.output,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			stopReason: "length",
@@ -123,17 +146,46 @@ describe("isContextOverflow", () => {
 	}
 
 	it("detects Xiaomi-style overflow (length stop with zero output and filled context)", () => {
-		const message = createLengthStopMessage(58, 1048512, 0);
+		const message = createLengthStopMessage({
+			input: 58,
+			cacheRead: 1048512,
+			output: 0,
+			provider: "xiaomi",
+			model: "mimo-v2.5-pro",
+		});
 		expect(isContextOverflow(message, 1048576)).toBe(true);
 	});
 
-	it("does not treat normal length stops with output as overflow", () => {
-		const message = createLengthStopMessage(1000, 0, 4096);
+	it("treats a length stop below the desired output limit as recoverable", () => {
+		const message = createLengthStopMessage({
+			input: 3,
+			cacheRead: 253584,
+			cacheWrite: 25554,
+			output: 16,
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-5.6-sol",
+		});
+		expect(isRecoverableLength(message, 128000)).toBe(true);
+	});
+
+	it("does not recover a length stop that reached the desired output limit", () => {
+		const message = createLengthStopMessage({ input: 4062, cacheRead: 0, output: 1024 });
+		expect(isRecoverableLength(message, 1024)).toBe(false);
+	});
+
+	it("treats zero-output length stops as recoverable without context metadata", () => {
+		const message = createLengthStopMessage({ input: 100, cacheRead: 0, output: 0 });
+		expect(isRecoverableLength(message, 128000)).toBe(true);
+	});
+
+	it("does not treat normal length stops with output as context overflow", () => {
+		const message = createLengthStopMessage({ input: 1000, cacheRead: 0, output: 4096 });
 		expect(isContextOverflow(message, 200000)).toBe(false);
 	});
 
-	it("does not treat length stops far below context as overflow", () => {
-		const message = createLengthStopMessage(100, 0, 0);
+	it("does not treat zero-output length stops far below context as context overflow", () => {
+		const message = createLengthStopMessage({ input: 100, cacheRead: 0, output: 0 });
 		expect(isContextOverflow(message, 200000)).toBe(false);
 	});
 });

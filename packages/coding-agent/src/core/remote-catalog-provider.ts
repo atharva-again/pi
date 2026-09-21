@@ -1,8 +1,10 @@
-import type { Api, Model, Provider } from "@earendil-works/pi-ai";
+import type { Api, Model, ModelsStoreEntry, Provider } from "@earendil-works/pi-ai";
 import { VERSION } from "../config.ts";
+import { fetchWithRetry } from "../utils/management-http.ts";
 import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 
 const DEFAULT_CATALOG_BASE_URL = "https://pi.dev";
+const REMOTE_CATALOG_ATTEMPT_TIMEOUT_MS = 4_000;
 export const REMOTE_CATALOG_REFRESH_INTERVAL_MS = 4 * 60 * 60 * 1000;
 
 function mergeModels(baseline: readonly Model<Api>[], dynamic: readonly Model<Api>[]): Model<Api>[] {
@@ -29,55 +31,107 @@ function parseCatalog(providerId: string, value: unknown): Model<Api>[] {
 		.map((model) => ({ ...model, provider: providerId }));
 }
 
+function remoteModels(
+	entry: ModelsStoreEntry | undefined,
+	localGeneratedAt: number | undefined,
+): readonly Model<Api>[] {
+	if (!entry) return [];
+	if (localGeneratedAt !== undefined && (entry.lastModified === undefined || entry.lastModified <= localGeneratedAt)) {
+		return [];
+	}
+	return entry.models;
+}
+
 /** Add a persisted pi.dev catalog overlay to a static built-in provider. */
-export function withRemoteCatalog(provider: Provider, catalogBaseUrl: string = DEFAULT_CATALOG_BASE_URL): Provider {
+export function withRemoteCatalog(
+	provider: Provider,
+	catalogBaseUrl: string = DEFAULT_CATALOG_BASE_URL,
+	localGeneratedAt?: number,
+): Provider {
 	let dynamicModels: readonly Model<Api>[] = [];
-	let inflightRefresh: Promise<void> | undefined;
 
 	return {
 		...provider,
 		getModels: () => mergeModels(provider.getModels(), dynamicModels),
-		refreshModels: (context) => {
-			inflightRefresh ??= (async () => {
-				try {
-					const stored = await context.store.read();
-					if (stored) dynamicModels = stored.models.filter((model) => model.provider === provider.id);
-					if (!context.allowNetwork || context.signal?.aborted) return;
-					if (
-						!context.force &&
-						stored?.checkedAt !== undefined &&
-						Date.now() - stored.checkedAt < REMOTE_CATALOG_REFRESH_INTERVAL_MS
-					) {
-						return;
-					}
+		refreshModels: async (context) => {
+			const stored = context.stored;
+			const restored = remoteModels(stored, localGeneratedAt).filter((model) => model.provider === provider.id);
+			if (
+				!(await context.publish({
+					update: () => {
+						dynamicModels = restored;
+					},
+				}))
+			) {
+				return;
+			}
+			if (!context.allowNetwork || context.signal.aborted) return;
+			if (
+				!context.force &&
+				stored?.checkedAt !== undefined &&
+				stored.lastModified !== undefined &&
+				Date.now() - stored.checkedAt < REMOTE_CATALOG_REFRESH_INTERVAL_MS
+			) {
+				return;
+			}
 
-					const url = new URL(`/api/models/providers/${encodeURIComponent(provider.id)}`, catalogBaseUrl);
-					const response = await fetch(url, {
-						headers: {
-							accept: "application/json",
-							"User-Agent": getPiUserAgent(VERSION),
-						},
-						signal: context.signal,
-					});
-					if (context.signal?.aborted) return;
-					const checkedAt = Date.now();
-					if (response.status === 404 || response.status === 501) {
-						await context.store.write({ models: dynamicModels, checkedAt });
-						return;
-					}
-					if (!response.ok) {
-						await context.store.write({ models: dynamicModels, checkedAt });
-						throw new Error(`Model catalog request failed for ${provider.id}: ${response.status}`);
-					}
-					const refreshed = parseCatalog(provider.id, await response.json());
-					if (context.signal?.aborted) return;
-					dynamicModels = refreshed;
-					await context.store.write({ models: refreshed, checkedAt });
-				} finally {
-					inflightRefresh = undefined;
-				}
-			})();
-			return inflightRefresh;
+			// Only revalidate when a cached body backs the validator, so a 304 can never
+			// leave the overlay empty.
+			const validator = stored?.models.length ? stored.etag : undefined;
+			const url = new URL(`/api/models/providers/${encodeURIComponent(provider.id)}`, catalogBaseUrl);
+			const response = await fetchWithRetry(
+				url,
+				{
+					headers: {
+						accept: "application/json",
+						"User-Agent": getPiUserAgent(VERSION),
+						...(validator ? { "if-none-match": validator } : {}),
+					},
+					signal: context.signal,
+				},
+				{ attemptTimeoutMs: REMOTE_CATALOG_ATTEMPT_TIMEOUT_MS },
+			);
+			if (context.signal.aborted) return;
+			const checkedAt = Date.now();
+			// Unchanged: dynamicModels already holds the stored overlay, so only the
+			// freshness window moves.
+			if (response.status === 304 && stored) {
+				await context.publish({ persist: { ...stored, checkedAt } });
+				return;
+			}
+			if (response.status === 404 || response.status === 501) {
+				await context.publish({
+					persist: {
+						...(stored ?? { models: [] }),
+						checkedAt,
+						lastModified: 0,
+						etag: undefined,
+					},
+				});
+				return;
+			}
+			if (!response.ok) {
+				// Transient failure: the cached body and its validator stay valid, so keep the
+				// etag and let the next refresh revalidate instead of downloading the catalog.
+				await context.publish({ persist: { ...(stored ?? { models: [] }), checkedAt } });
+				throw new Error(`Model catalog request failed for ${provider.id}: ${response.status}`);
+			}
+			const refreshed = parseCatalog(provider.id, await response.json());
+			const lastModified = Date.parse(response.headers.get("last-modified") ?? "");
+			if (context.signal.aborted) return;
+			const entry = {
+				models: refreshed,
+				checkedAt,
+				lastModified: Number.isNaN(lastModified) ? 0 : lastModified,
+				etag: response.headers.get("etag") ?? undefined,
+			};
+			const published = remoteModels(entry, localGeneratedAt);
+			await context.publish({
+				persist: entry,
+				update: () => {
+					dynamicModels = published;
+				},
+			});
 		},
 	};
 }

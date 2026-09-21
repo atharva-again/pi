@@ -5,6 +5,8 @@ import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { findMostRecentSession, loadEntriesFromFile, SessionManager } from "../../src/core/session-manager.ts";
 
+const HEADER_SCAN_LIMIT_BYTES = 1024 * 1024;
+
 describe("loadEntriesFromFile", () => {
 	let tempDir: string;
 
@@ -16,6 +18,19 @@ describe("loadEntriesFromFile", () => {
 	afterEach(() => {
 		rmSync(tempDir, { recursive: true, force: true });
 	});
+
+	function writeSessionHeader(file: string, cwd: string, id: string, prefix = ""): void {
+		writeFileSync(
+			file,
+			`${prefix}${JSON.stringify({
+				type: "session",
+				version: 3,
+				id,
+				timestamp: "2025-01-01T00:00:00Z",
+				cwd,
+			})}\n`,
+		);
+	}
 
 	it("returns empty array for non-existent file", () => {
 		const entries = loadEntriesFromFile(join(tempDir, "nonexistent.jsonl"));
@@ -63,6 +78,73 @@ describe("loadEntriesFromFile", () => {
 		);
 		const entries = loadEntriesFromFile(file);
 		expect(entries).toHaveLength(2);
+	});
+
+	it("adds a newline after an unterminated valid record", () => {
+		const file = join(tempDir, "unterminated.jsonl");
+		const content =
+			'{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n' +
+			'{"type":"message","id":"1","parentId":null,"timestamp":"2025-01-01T00:00:01Z","message":{"role":"user","content":"hi","timestamp":1}}';
+		writeFileSync(file, content);
+
+		expect(loadEntriesFromFile(file)).toHaveLength(2);
+		expect(readFileSync(file, "utf8")).toBe(`${content}\n`);
+	});
+
+	it("adds a newline after an unterminated malformed final fragment", () => {
+		const file = join(tempDir, "malformed-tail.jsonl");
+		const content =
+			'{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n' + '{"type":"message"';
+		writeFileSync(file, content);
+
+		expect(loadEntriesFromFile(file)).toHaveLength(1);
+		expect(readFileSync(file, "utf8")).toBe(`${content}\n`);
+	});
+
+	it("does not modify an unterminated non-session file", () => {
+		const file = join(tempDir, "invalid.jsonl");
+		const content = '{"type":"message","id":"1"}';
+		writeFileSync(file, content);
+
+		expect(loadEntriesFromFile(file)).toEqual([]);
+		expect(readFileSync(file, "utf8")).toBe(content);
+	});
+
+	it.each([
+		["leading blank lines", "\n  \n", "leading-blank"],
+		["leading malformed lines", "not json\n{broken json\n", "leading-malformed"],
+		["a multi-buffer header", "", "a".repeat(8192)],
+	])("reads cwd from a session with %s", (_description, prefix, sessionId) => {
+		const file = join(tempDir, "header.jsonl");
+		const storedCwd = join(tempDir, "stored-project");
+		writeSessionHeader(file, storedCwd, sessionId, prefix);
+
+		const sessionManager = SessionManager.open(file, tempDir);
+		expect(sessionManager.getSessionId()).toBe(sessionId);
+		expect(sessionManager.getCwd()).toBe(storedCwd);
+	});
+
+	it("opens compatible sessions beyond the discovery scan limit", () => {
+		const storedCwd = join(tempDir, "stored-project");
+		const overrideCwd = join(tempDir, "override-project");
+		const cases = [
+			{ name: "large-header", id: "a".repeat(HEADER_SCAN_LIMIT_BYTES + 1), prefix: "" },
+			{
+				name: "large-prefix",
+				id: "large-prefix",
+				prefix: `${"x".repeat(HEADER_SCAN_LIMIT_BYTES + 1)}\n`,
+			},
+		];
+
+		for (const { name, id, prefix } of cases) {
+			const file = join(tempDir, `${name}.jsonl`);
+			writeSessionHeader(file, storedCwd, id, prefix);
+			for (const cwdOverride of [undefined, overrideCwd]) {
+				const sessionManager = SessionManager.open(file, tempDir, cwdOverride);
+				expect(sessionManager.getSessionId()).toBe(id);
+				expect(sessionManager.getCwd()).toBe(cwdOverride ?? storedCwd);
+			}
+		}
 	});
 
 	it("opens session files larger than Node's max string length", () => {
@@ -155,6 +237,15 @@ describe("findMostRecentSession", () => {
 		expect(findMostRecentSession(tempDir)).toBe(valid);
 	});
 
+	it("skips oversized corrupt files and returns a valid session", () => {
+		const invalid = join(tempDir, "oversized.jsonl");
+		const valid = join(tempDir, "valid.jsonl");
+		writeFileSync(invalid, "x".repeat(HEADER_SCAN_LIMIT_BYTES + 1));
+		writeFileSync(valid, '{"type":"session","id":"abc","timestamp":"2025-01-01T00:00:00Z","cwd":"/tmp"}\n');
+
+		expect(findMostRecentSession(tempDir)).toBe(valid);
+	});
+
 	it("filters most recent session by cwd", async () => {
 		const projectA = join(tempDir, "project-a");
 		const projectB = join(tempDir, "project-b");
@@ -233,6 +324,22 @@ describe("SessionManager custom flat session directory", () => {
 
 		const continuedA = SessionManager.continueRecent(projectA, tempDir);
 		expect(continuedA.getSessionFile()).toBe(sessionA);
+	});
+
+	it("rejects a cancelled session listing", async () => {
+		createPersistedSession(projectA, "from A");
+		createPersistedSession(projectB, "from B");
+		const controller = new AbortController();
+		const listing = SessionManager.listAll(
+			tempDir,
+			(_loaded, _total, partialSessions) => {
+				if (partialSessions) controller.abort();
+			},
+			controller.signal,
+		);
+
+		await expect(listing).rejects.toMatchObject({ name: "AbortError" });
+		await expect(SessionManager.listAll(undefined, controller.signal)).rejects.toMatchObject({ name: "AbortError" });
 	});
 });
 

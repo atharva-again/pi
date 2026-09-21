@@ -8,6 +8,8 @@ dist/
 packages/*/dist/
 packages/*/dist-chrome/
 packages/*/dist-firefox/
+packages/ai/src/providers/data/
+packages/ai/src/providers/.model-generation-*/
 *.cpuprofile
 
 # Environment
@@ -40,3 +42,4 @@ plans/
 .pi/hf-sessions/
 .pi/hf-sessions-backup/
 collect.sh
+packages/agent/docs/extensions/pi-server-artifact/index.md

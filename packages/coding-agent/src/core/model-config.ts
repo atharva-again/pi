@@ -6,6 +6,7 @@ import { Compile } from "typebox/compile";
 import type { TLocalizedValidationError } from "typebox/error";
 import { stripJsonComments } from "../utils/json.ts";
 import { normalizePath } from "../utils/paths.ts";
+import { stripBom } from "../utils/text.ts";
 
 const PercentileCutoffsSchema = Type.Object({
 	p50: Type.Optional(Type.Number()),
@@ -74,6 +75,7 @@ const OpenAICompletionsCompatSchema = Type.Object({
 	supportsDeveloperRole: Type.Optional(Type.Boolean()),
 	supportsReasoningEffort: Type.Optional(Type.Boolean()),
 	supportsUsageInStreaming: Type.Optional(Type.Boolean()),
+	supportsFinishReason: Type.Optional(Type.Boolean()),
 	maxTokensField: Type.Optional(Type.Union([Type.Literal("max_completion_tokens"), Type.Literal("max_tokens")])),
 	requiresToolResultName: Type.Optional(Type.Boolean()),
 	requiresAssistantAfterToolResult: Type.Optional(Type.Boolean()),
@@ -84,6 +86,7 @@ const OpenAICompletionsCompatSchema = Type.Object({
 			Type.Literal("openai"),
 			Type.Literal("openrouter"),
 			Type.Literal("together"),
+			Type.Literal("baseten"),
 			Type.Literal("deepseek"),
 			Type.Literal("zai"),
 			Type.Literal("qwen"),
@@ -94,16 +97,18 @@ const OpenAICompletionsCompatSchema = Type.Object({
 		]),
 	),
 	chatTemplateKwargs: Type.Optional(Type.Record(Type.String(), ChatTemplateKwargSchema)),
+	chatTemplateArgs: Type.Optional(Type.Record(Type.String(), ChatTemplateKwargSchema)),
 	cacheControlFormat: Type.Optional(Type.Literal("anthropic")),
 	openRouterRouting: Type.Optional(OpenRouterRoutingSchema),
 	vercelGatewayRouting: Type.Optional(VercelGatewayRoutingSchema),
+	supportsOpenAIGrammarTools: Type.Optional(Type.Boolean()),
 	supportsStrictMode: Type.Optional(Type.Boolean()),
 	sendSessionAffinityHeaders: Type.Optional(Type.Boolean()),
-	deferredToolsMode: Type.Optional(Type.Literal("kimi")),
 	sessionAffinityFormat: Type.Optional(
 		Type.Union([Type.Literal("openai"), Type.Literal("openai-nosession"), Type.Literal("openrouter")]),
 	),
 	supportsLongCacheRetention: Type.Optional(Type.Boolean()),
+	vllmPriority: Type.Optional(Type.Number()),
 });
 
 const OpenAIResponsesCompatSchema = Type.Object({
@@ -112,23 +117,10 @@ const OpenAIResponsesCompatSchema = Type.Object({
 		Type.Union([Type.Literal("openai"), Type.Literal("openai-nosession"), Type.Literal("openrouter")]),
 	),
 	supportsLongCacheRetention: Type.Optional(Type.Boolean()),
-	supportsToolSearch: Type.Optional(Type.Boolean()),
+	supportsStrictMode: Type.Optional(Type.Boolean()),
+	supportsOpenAIGrammarTools: Type.Optional(Type.Boolean()),
+	supportsMaxOutputTokens: Type.Optional(Type.Boolean()),
 });
-
-const AnthropicMessagesCompatSchema = Type.Object({
-	supportsEagerToolInputStreaming: Type.Optional(Type.Boolean()),
-	supportsLongCacheRetention: Type.Optional(Type.Boolean()),
-	sendSessionAffinityHeaders: Type.Optional(Type.Boolean()),
-	supportsCacheControlOnTools: Type.Optional(Type.Boolean()),
-	forceAdaptiveThinking: Type.Optional(Type.Boolean()),
-	supportsToolReferences: Type.Optional(Type.Boolean()),
-});
-
-const ProviderCompatSchema = Type.Union([
-	OpenAICompletionsCompatSchema,
-	OpenAIResponsesCompatSchema,
-	AnthropicMessagesCompatSchema,
-]);
 
 const ModelCostRatesSchema = {
 	input: Type.Number(),
@@ -144,6 +136,54 @@ const ModelCostSchema = Type.Object({
 	...ModelCostRatesSchema,
 	tiers: Type.Optional(Type.Array(ModelCostTierSchema)),
 });
+const ModelPromptCacheSchema = Type.Object({
+	short: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+	long: Type.Optional(Type.Number({ exclusiveMinimum: 0 })),
+});
+const ImageResizeSchema = Type.Object({
+	maxWidth: Type.Optional(Type.Integer({ minimum: 1 })),
+	maxHeight: Type.Optional(Type.Integer({ minimum: 1 })),
+	maxBytes: Type.Optional(Type.Integer({ minimum: 1 })),
+	jpegQuality: Type.Optional(Type.Integer({ minimum: 1, maximum: 100 })),
+});
+const ModelInputLimitsSchema = Type.Object({
+	maxRequestBytes: Type.Optional(Type.Integer({ minimum: 1 })),
+	images: Type.Optional(
+		Type.Object({
+			resize: Type.Optional(ImageResizeSchema),
+			maxPerMessage: Type.Optional(Type.Integer({ minimum: 1 })),
+			maxPerRequest: Type.Optional(Type.Integer({ minimum: 1 })),
+		}),
+	),
+});
+
+const AnthropicMessagesCompatSchema = Type.Object({
+	supportsEagerToolInputStreaming: Type.Optional(Type.Boolean()),
+	supportsLongCacheRetention: Type.Optional(Type.Boolean()),
+	sendSessionAffinityHeaders: Type.Optional(Type.Boolean()),
+	supportsCacheControlOnTools: Type.Optional(Type.Boolean()),
+	supportsTemperature: Type.Optional(Type.Boolean()),
+	forceAdaptiveThinking: Type.Optional(Type.Boolean()),
+	allowEmptySignature: Type.Optional(Type.Boolean()),
+	supportsStrictTools: Type.Optional(Type.Boolean()),
+	supportsMidConvoEffort: Type.Optional(Type.Boolean()),
+	allowedFallbackModels: Type.Optional(
+		Type.Array(
+			Type.Object({
+				provider: Type.String({ minLength: 1 }),
+				model: Type.String({ minLength: 1 }),
+				cost: ModelCostSchema,
+			}),
+			{ maxItems: 3 },
+		),
+	),
+});
+
+const ProviderCompatSchema = Type.Union([
+	OpenAICompletionsCompatSchema,
+	OpenAIResponsesCompatSchema,
+	AnthropicMessagesCompatSchema,
+]);
 
 const ModelDefinitionSchema = Type.Object({
 	id: Type.String({ minLength: 1 }),
@@ -153,9 +193,12 @@ const ModelDefinitionSchema = Type.Object({
 	reasoning: Type.Optional(Type.Boolean()),
 	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
 	input: Type.Optional(Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]))),
+	inputLimits: Type.Optional(ModelInputLimitsSchema),
 	cost: Type.Optional(ModelCostSchema),
+	promptCache: Type.Optional(ModelPromptCacheSchema),
 	contextWindow: Type.Optional(Type.Number()),
 	maxTokens: Type.Optional(Type.Number()),
+	samplingParams: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
 	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
 	compat: Type.Optional(ProviderCompatSchema),
 });
@@ -165,6 +208,7 @@ const ModelOverrideSchema = Type.Object({
 	reasoning: Type.Optional(Type.Boolean()),
 	thinkingLevelMap: Type.Optional(ThinkingLevelMapSchema),
 	input: Type.Optional(Type.Array(Type.Union([Type.Literal("text"), Type.Literal("image")]))),
+	inputLimits: Type.Optional(ModelInputLimitsSchema),
 	cost: Type.Optional(
 		Type.Object({
 			input: Type.Optional(Type.Number()),
@@ -174,8 +218,10 @@ const ModelOverrideSchema = Type.Object({
 			tiers: Type.Optional(Type.Array(ModelCostTierSchema)),
 		}),
 	),
+	promptCache: Type.Optional(ModelPromptCacheSchema),
 	contextWindow: Type.Optional(Type.Number()),
 	maxTokens: Type.Optional(Type.Number()),
+	samplingParams: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
 	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
 	compat: Type.Optional(ProviderCompatSchema),
 });
@@ -248,7 +294,7 @@ export class ModelConfig {
 
 		let parsed: unknown;
 		try {
-			parsed = JSON.parse(stripJsonComments(content));
+			parsed = JSON.parse(stripJsonComments(stripBom(content)));
 		} catch (error) {
 			return new ModelConfig(
 				new Map(),

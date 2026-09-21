@@ -3,7 +3,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS } from "../src/core/http-dispatcher.ts";
-import { SettingsManager } from "../src/core/settings-manager.ts";
+import { type Settings, SettingsManager } from "../src/core/settings-manager.ts";
 
 describe("SettingsManager", () => {
 	const testDir = join(process.cwd(), "test-settings-tmp");
@@ -185,7 +185,7 @@ describe("SettingsManager", () => {
 			expect(manager.getDefaultModel()).toBe("claude-sonnet");
 		});
 
-		it("should keep previous settings when file is invalid", async () => {
+		it("should keep previous settings and report the file path when the file is invalid", async () => {
 			const settingsPath = join(agentDir, "settings.json");
 			writeFileSync(settingsPath, JSON.stringify({ theme: "dark" }));
 
@@ -195,6 +195,7 @@ describe("SettingsManager", () => {
 			await manager.reload();
 
 			expect(manager.getTheme()).toBe("dark");
+			expect(manager.drainErrors()).toMatchObject([{ scope: "global", path: settingsPath }]);
 		});
 	});
 
@@ -227,7 +228,10 @@ describe("SettingsManager", () => {
 			const errors = manager.drainErrors();
 
 			expect(errors).toHaveLength(2);
-			expect(errors.map((e) => e.scope).sort()).toEqual(["global", "project"]);
+			expect(errors).toMatchObject([
+				{ scope: "global", path: globalSettingsPath },
+				{ scope: "project", path: projectSettingsPath },
+			]);
 			expect(manager.drainErrors()).toEqual([]);
 		});
 	});
@@ -331,6 +335,41 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("terminal capability overrides", () => {
+		it("maps explicit values and omits auto values", () => {
+			const getOverrides = (terminal: NonNullable<Settings["terminal"]>) =>
+				SettingsManager.inMemory({ terminal }).getTerminalCapabilityOverrides();
+
+			expect(getOverrides({ images: false, trueColor: false, hyperlinks: false })).toEqual({
+				images: null,
+				trueColor: false,
+				hyperlinks: false,
+			});
+			expect(getOverrides({ images: "kitty", trueColor: true, hyperlinks: true })).toEqual({
+				images: "kitty",
+				trueColor: true,
+				hyperlinks: true,
+			});
+			expect(getOverrides({ images: "auto", trueColor: "auto", hyperlinks: "auto" })).toEqual({});
+		});
+	});
+
+	describe("retry settings", () => {
+		it("defaults and overrides agent retry delay cap", () => {
+			expect(SettingsManager.inMemory().getRetrySettings()).toEqual({
+				enabled: true,
+				maxRetries: 3,
+				baseDelayMs: 2000,
+				maxAgentDelayMs: 60000,
+			});
+			expect(
+				SettingsManager.inMemory({
+					retry: { enabled: true, maxRetries: 10, baseDelayMs: 500, maxAgentDelayMs: 5000 },
+				}).getRetrySettings(),
+			).toEqual({ enabled: true, maxRetries: 10, baseDelayMs: 500, maxAgentDelayMs: 5000 });
+		});
+	});
+
 	describe("httpIdleTimeoutMs", () => {
 		it("should default to 5 minutes", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
@@ -351,6 +390,30 @@ describe("SettingsManager", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
 
 			expect(() => manager.getHttpIdleTimeoutMs()).toThrow("Invalid httpIdleTimeoutMs setting");
+		});
+	});
+
+	describe("cacheWarming", () => {
+		it("defaults to streaming and ignores project settings", () => {
+			expect(SettingsManager.create(projectDir, agentDir).getCacheWarmingMode()).toBe("streaming");
+
+			writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ cacheWarming: "idle" }));
+			expect(SettingsManager.create(projectDir, agentDir).getCacheWarmingMode()).toBe("streaming");
+
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ cacheWarming: "idle" }));
+			expect(SettingsManager.create(projectDir, agentDir).getCacheWarmingMode()).toBe("idle");
+
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ cacheWarming: "bogus" }));
+			expect(SettingsManager.create(projectDir, agentDir).getCacheWarmingMode()).toBe("streaming");
+		});
+
+		it("persists the mode globally", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+			manager.setCacheWarmingMode("off");
+			await manager.flush();
+
+			expect(SettingsManager.create(projectDir, agentDir).getCacheWarmingMode()).toBe("off");
+			expect(JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"))).toEqual({ cacheWarming: "off" });
 		});
 	});
 
@@ -397,6 +460,62 @@ describe("SettingsManager", () => {
 		});
 	});
 
+	describe("TUI mode", () => {
+		it("defaults to regular and persists fullscreen mode", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getTuiMode()).toBe("regular");
+
+			manager.setTuiMode("fullscreen");
+			await manager.flush();
+
+			expect(manager.getTuiMode()).toBe("fullscreen");
+			const savedSettings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8"));
+			expect(savedSettings.tuiMode).toBe("fullscreen");
+		});
+
+		it("falls back to regular for unsupported values", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ tuiMode: "other" }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getTuiMode()).toBe("regular");
+		});
+
+		it("does not recognize the old uiMode setting", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ uiMode: "fullscreen" }));
+
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getTuiMode()).toBe("regular");
+		});
+	});
+
+	it("validates and persists fullscreen settings", async () => {
+		const manager = SettingsManager.create(projectDir, agentDir);
+		expect(manager.getFullscreenExitOutput()).toBe("transcript");
+		expect(manager.getFullscreenScrollbar()).toBe("auto");
+		expect(manager.getFullscreenCopyOnSelect()).toBe(true);
+
+		manager.setFullscreenExitOutput("resume-hint");
+		manager.setFullscreenScrollbar("hidden");
+		manager.setFullscreenCopyOnSelect(false);
+		await manager.flush();
+		const savedSettings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8"));
+		expect(savedSettings.fullscreenExitOutput).toBe("resume-hint");
+		expect(savedSettings.fullscreenScrollbar).toBe("hidden");
+		expect(savedSettings.fullscreenCopyOnSelect).toBe(false);
+
+		writeFileSync(
+			join(agentDir, "settings.json"),
+			JSON.stringify({ fullscreenExitOutput: "nothing", fullscreenScrollbar: "sometimes" }),
+		);
+		const reloadedManager = SettingsManager.create(projectDir, agentDir);
+		expect(reloadedManager.getFullscreenExitOutput()).toBe("transcript");
+		expect(reloadedManager.getFullscreenScrollbar()).toBe("auto");
+		expect(reloadedManager.getFullscreenCopyOnSelect()).toBe(true);
+	});
+
 	describe("outputPad", () => {
 		it("should default to 1 and persist binary values", async () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
@@ -417,6 +536,27 @@ describe("SettingsManager", () => {
 			const manager = SettingsManager.create(projectDir, agentDir);
 
 			expect(manager.getOutputPad()).toBe(1);
+		});
+	});
+
+	describe("markdown.mermaid", () => {
+		it("defaults to streaming and persists rendering modes", async () => {
+			const manager = SettingsManager.create(projectDir, agentDir);
+
+			expect(manager.getMermaidRenderingMode()).toBe("streaming");
+
+			manager.setMermaidRenderingMode("final");
+			await manager.flush();
+
+			expect(manager.getMermaidRenderingMode()).toBe("final");
+			const savedSettings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf-8"));
+			expect(savedSettings.markdown.mermaid).toBe("final");
+		});
+
+		it("falls back to streaming for unsupported values", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ markdown: { mermaid: "sometimes" } }));
+
+			expect(SettingsManager.create(projectDir, agentDir).getMermaidRenderingMode()).toBe("streaming");
 		});
 	});
 
@@ -450,6 +590,23 @@ describe("SettingsManager", () => {
 			const savedSettings = JSON.parse(readFileSync(settingsPath, "utf-8"));
 			expect(savedSettings.shellCommandPrefix).toBe("shopt -s expand_aliases");
 			expect(savedSettings.theme).toBe("light");
+		});
+	});
+
+	describe("defaultTools", () => {
+		it("loads global defaults and lets project settings replace them", () => {
+			writeFileSync(join(agentDir, "settings.json"), JSON.stringify({ defaultTools: ["read", "bash"] }));
+
+			expect(SettingsManager.create(projectDir, agentDir).getDefaultTools()).toEqual(["read", "bash"]);
+
+			writeFileSync(join(projectDir, ".pi", "settings.json"), JSON.stringify({ defaultTools: ["grep"] }));
+
+			expect(SettingsManager.create(projectDir, agentDir).getDefaultTools()).toEqual(["grep"]);
+		});
+
+		it("preserves an empty tool list", () => {
+			expect(SettingsManager.inMemory({ defaultTools: [] }).getDefaultTools()).toEqual([]);
+			expect(SettingsManager.inMemory().getDefaultTools()).toBeUndefined();
 		});
 	});
 

@@ -1,4 +1,17 @@
-import type { Api, Model } from "@earendil-works/pi-ai";
+import type {
+	Api,
+	AssistantMessage,
+	AssistantMessageEventStream,
+	AuthResult,
+	Context,
+	Model,
+	ModelsApiStreamOptions,
+	ModelsRefreshOptions,
+	ModelsRefreshResult,
+	ModelsSimpleStreamOptions,
+	Provider,
+	ProviderHeaders,
+} from "@earendil-works/pi-ai";
 import type { ModelRuntime } from "./model-runtime.ts";
 import type { AuthStatus, ProviderConfigInput } from "./provider-composer.ts";
 
@@ -7,7 +20,8 @@ export type ResolvedRequestAuth =
 	| {
 			ok: true;
 			apiKey?: string;
-			headers?: Record<string, string>;
+			headers?: ProviderHeaders;
+			baseUrl?: string;
 			env?: Record<string, string>;
 	  }
 	| { ok: false; error: string };
@@ -25,8 +39,8 @@ export class ModelRegistry {
 	}
 
 	/** Reload models.json asynchronously. Await before making synchronous registry reads. */
-	refresh(): Promise<void> {
-		return this.runtime.reloadConfig();
+	refresh(options?: ModelsRefreshOptions): Promise<ModelsRefreshResult> {
+		return this.runtime.refresh(options);
 	}
 
 	getError(): string | undefined {
@@ -57,23 +71,15 @@ export class ModelRegistry {
 				if (compatibility.authHeader) {
 					return { ok: false, error: `No API key found for "${model.provider}"` };
 				}
-				const headers = compatibility.headers
-					? Object.fromEntries(
-							Object.entries(compatibility.headers).filter(
-								(entry): entry is [string, string] => entry[1] !== null,
-							),
-						)
-					: undefined;
-				return { ok: true, headers };
+				return { ok: true, headers: compatibility.headers };
 			}
-			const headers = resolution.auth.headers
-				? Object.fromEntries(
-						Object.entries(resolution.auth.headers).filter(
-							(entry): entry is [string, string] => entry[1] !== null,
-						),
-					)
-				: undefined;
-			return { ok: true, apiKey: resolution.auth.apiKey, headers, env: resolution.env };
+			return {
+				ok: true,
+				apiKey: resolution.auth.apiKey,
+				headers: resolution.auth.headers,
+				...(resolution.auth.baseUrl ? { baseUrl: resolution.auth.baseUrl } : {}),
+				env: resolution.env,
+			};
 		} catch (error) {
 			const cause = error instanceof Error ? error.cause : undefined;
 			const message =
@@ -92,8 +98,38 @@ export class ModelRegistry {
 		return this.runtime.getProviderAuthStatus(provider);
 	}
 
+	getProvider(provider: string): Provider | undefined {
+		return this.runtime.getProvider(provider);
+	}
+
+	/** Stream through the configured provider with request-time authentication. */
+	stream<TApi extends Api>(
+		model: Model<TApi>,
+		context: Context,
+		options?: ModelsApiStreamOptions<TApi>,
+	): AssistantMessageEventStream {
+		return this.runtime.stream(model, context, options);
+	}
+
+	/** Stream with provider-neutral options and request-time authentication. */
+	streamSimple(model: Model<Api>, context: Context, options?: ModelsSimpleStreamOptions): AssistantMessageEventStream {
+		return this.runtime.streamSimple(model, context, options);
+	}
+
+	complete<TApi extends Api>(
+		model: Model<TApi>,
+		context: Context,
+		options?: ModelsApiStreamOptions<TApi>,
+	): Promise<AssistantMessage> {
+		return this.runtime.complete(model, context, options);
+	}
+
 	getProviderDisplayName(provider: string): string {
 		return this.runtime.getProvider(provider)?.name ?? provider;
+	}
+
+	getProviderAuth(provider: string): Promise<AuthResult | undefined> {
+		return this.runtime.getAuth(provider);
 	}
 
 	async getApiKeyForProvider(provider: string): Promise<string | undefined> {
@@ -108,8 +144,15 @@ export class ModelRegistry {
 		return this.runtime.isUsingOAuth(model.provider);
 	}
 
-	registerProvider(providerName: string, config: ProviderConfigInput): void {
-		this.runtime.registerProvider(providerName, config);
+	registerProvider(provider: Provider): void;
+	registerProvider(providerName: string, config: ProviderConfigInput): void;
+	registerProvider(providerOrName: Provider | string, config?: ProviderConfigInput): void {
+		if (typeof providerOrName === "string") {
+			if (!config) throw new Error("Provider config is required when registering by name");
+			this.runtime.registerProvider(providerOrName, config);
+			return;
+		}
+		this.runtime.registerNativeProvider(providerOrName);
 	}
 
 	unregisterProvider(providerName: string): void {
@@ -118,6 +161,10 @@ export class ModelRegistry {
 
 	getRegisteredProviderConfig(providerName: string): ProviderConfigInput | undefined {
 		return this.runtime.getRegisteredProviderConfig(providerName);
+	}
+
+	getRegisteredNativeProvider(providerName: string): Provider | undefined {
+		return this.runtime.getRegisteredNativeProvider(providerName);
 	}
 
 	getRegisteredProviderIds(): readonly string[] {

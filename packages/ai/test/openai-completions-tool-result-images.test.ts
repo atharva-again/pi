@@ -1,14 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { convertMessages } from "../src/api/openai-completions.ts";
-import { getModel } from "../src/compat.ts";
-import type {
-	AssistantMessage,
-	Context,
-	Model,
-	OpenAICompletionsCompat,
-	ToolResultMessage,
-	Usage,
-} from "../src/types.ts";
+import { getModel, normalizeContext } from "../src/compat.ts";
+import type { AssistantMessage, Model, OpenAICompletionsCompat, ToolResultMessage, Usage } from "../src/types.ts";
 
 const emptyUsage: Usage = {
 	input: 0,
@@ -19,13 +12,14 @@ const emptyUsage: Usage = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-const compat: Omit<Required<OpenAICompletionsCompat>, "deferredToolsMode"> & {
-	deferredToolsMode?: OpenAICompletionsCompat["deferredToolsMode"];
+const compat: Omit<Required<OpenAICompletionsCompat>, "thinkingTokenBudgetField" | "vllmPriority"> & {
+	thinkingTokenBudgetField?: OpenAICompletionsCompat["thinkingTokenBudgetField"];
 } = {
 	supportsStore: true,
 	supportsDeveloperRole: true,
 	supportsReasoningEffort: true,
 	supportsUsageInStreaming: true,
+	supportsFinishReason: true,
 	maxTokensField: "max_completion_tokens",
 	requiresToolResultName: false,
 	requiresAssistantAfterToolResult: false,
@@ -35,8 +29,14 @@ const compat: Omit<Required<OpenAICompletionsCompat>, "deferredToolsMode"> & {
 	openRouterRouting: {},
 	vercelGatewayRouting: {},
 	chatTemplateKwargs: {},
+	chatTemplateArgs: {},
 	zaiToolStream: false,
+	supportsThinkingTokenBudget: false,
+	thinkingTokenBudgetField: undefined,
 	supportsStrictMode: true,
+	supportsOpenAIGrammarTools: false,
+	supportsMidConvoSystemMessages: false,
+	supportsMidConvoToolAdditions: false,
 	cacheControlFormat: "anthropic",
 	sendSessionAffinityHeaders: false,
 	sessionAffinityFormat: "openai",
@@ -92,14 +92,14 @@ describe("openai-completions convertMessages", () => {
 			timestamp: now,
 		};
 
-		const context: Context = {
+		const context = normalizeContext({
 			messages: [
 				{ role: "user", content: "Read the images", timestamp: now - 2 },
 				assistantMessage,
 				buildToolResult("tool-1", now + 1),
 				buildToolResult("tool-2", now + 2),
 			],
-		};
+		});
 
 		const messages = convertMessages(model, context, compat);
 		const roles = messages.map((message) => message.role);
@@ -135,13 +135,13 @@ describe("openai-completions convertMessages", () => {
 			timestamp: now,
 		};
 
-		const context: Context = {
+		const context = normalizeContext({
 			messages: [
 				{ role: "user", content: "Run the command", timestamp: now - 1 },
 				assistantMessage,
 				buildEmptyToolResult("tool-1", now + 1),
 			],
-		};
+		});
 
 		const messages = convertMessages(model, context, compat);
 		const toolMessage = messages.find((m) => m.role === "tool") as { role: "tool"; content: string } | undefined;

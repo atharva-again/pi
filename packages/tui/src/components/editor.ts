@@ -2,14 +2,23 @@ import type { AutocompleteProvider, AutocompleteSuggestions } from "../autocompl
 import { getKeybindings } from "../keybindings.ts";
 import { decodePrintableKey, matchesKey } from "../keys.ts";
 import { KillRing } from "../kill-ring.ts";
-import { type Component, CURSOR_MARKER, type Focusable, type TUI } from "../tui.ts";
+import {
+	type Component,
+	CURSOR_MARKER,
+	type Focusable,
+	type TUI,
+	type TuiMouseEvent,
+	type TuiMouseEventResult,
+} from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
 import {
+	autocompleteBoundaryRegex,
+	autocompleteSeparatorRegex,
 	cjkBreakRegex,
 	getGraphemeSegmenter,
 	getWordSegmenter,
 	isWhitespaceChar,
-	truncateToWidth,
+	sliceByColumn,
 	visibleWidth,
 } from "../utils.ts";
 import { findWordBackward, findWordForward } from "../word-navigation.ts";
@@ -212,6 +221,13 @@ interface EditorState {
 	cursorCol: number;
 }
 
+/** Undo snapshot: editor text state plus the paste registry. */
+interface EditorSnapshot {
+	state: EditorState;
+	pastes: Map<number, string>;
+	pasteCounter: number;
+}
+
 interface LayoutLine {
 	text: string;
 	hasCursor: boolean;
@@ -235,18 +251,44 @@ const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 
 const ATTACHMENT_AUTOCOMPLETE_DEBOUNCE_MS = 20;
 const DEFAULT_AUTOCOMPLETE_TRIGGER_CHARACTERS = ["@", "#"];
+// Unquoted completions end at whitespace or CJK punctuation; quoted paths may contain either.
+const unquotedAutocompleteSuffixRegex = new RegExp(`(?:(?!${autocompleteSeparatorRegex.source}).)*`, "u");
 
 function escapeCharacterClass(value: string): string {
 	return value.replace(/[\\^$.*+?()[\]{}|-]/g, "\\$&");
 }
 
 function buildTriggerPattern(triggerCharacters: string[]): RegExp {
-	return new RegExp(`(?:^|[\\s])[${triggerCharacters.map(escapeCharacterClass).join("")}][^\\s]*$`);
+	return new RegExp(
+		`${autocompleteBoundaryRegex.source}(?:@"[^"]*|[${triggerCharacters.map(escapeCharacterClass).join("")}]${unquotedAutocompleteSuffixRegex.source})$`,
+		"u",
+	);
 }
 
 function buildDebouncePattern(triggerCharacters: string[]): RegExp {
 	const escapedWithoutAt = triggerCharacters.filter((character) => character !== "@").map(escapeCharacterClass);
-	return new RegExp(`(?:^|[ \\t])(?:@(?:"[^"]*|[^\\s]*)|[${escapedWithoutAt.join("")}][^\\s]*)$`);
+	return new RegExp(
+		`${autocompleteBoundaryRegex.source}(?:@(?:"[^"]*|${unquotedAutocompleteSuffixRegex.source})|[${escapedWithoutAt.join("")}]${unquotedAutocompleteSuffixRegex.source})$`,
+		"u",
+	);
+}
+
+function createScrollBorder(direction: "↑" | "↓", hiddenLineCount: number, width: number): string {
+	const availableWidth = Math.max(0, width);
+	const label = ` ${direction} ${hiddenLineCount} more `;
+	const labelWidth = visibleWidth(label);
+	if (labelWidth + 2 <= availableWidth) {
+		const leftWidth = Math.floor((availableWidth - labelWidth) / 2);
+		return "─".repeat(leftWidth) + label + "─".repeat(availableWidth - leftWidth - labelWidth);
+	}
+
+	const indicator = `─── ${direction} ${hiddenLineCount} more `;
+	const remaining = availableWidth - visibleWidth(indicator);
+	if (remaining >= 0) return indicator + "─".repeat(remaining);
+
+	const ellipsis = "...".slice(0, availableWidth);
+	const indicatorWidth = availableWidth - visibleWidth(ellipsis);
+	return sliceByColumn(indicator, 0, indicatorWidth, true) + ellipsis;
 }
 
 export class Editor implements Component, Focusable {
@@ -263,8 +305,10 @@ export class Editor implements Component, Focusable {
 	private theme: EditorTheme;
 	private paddingX: number = 0;
 
-	// Store last render width for cursor navigation
+	// Store last render geometry for cursor navigation and mouse hit-testing.
 	private lastWidth: number = 80;
+	private renderedVisibleLineCount = 1;
+	private renderedAutocompleteHeight = 0;
 
 	// Vertical scrolling support
 	private scrollOffset: number = 0;
@@ -318,7 +362,7 @@ export class Editor implements Component, Focusable {
 	private snappedFromCursorCol: number | null = null;
 
 	// Undo support
-	private undoStack = new UndoStack<EditorState>();
+	private undoStack = new UndoStack<EditorSnapshot>();
 
 	public onSubmit?: (text: string) => void;
 	public onChange?: (text: string) => void;
@@ -461,6 +505,16 @@ export class Editor implements Component, Focusable {
 		// No cached state to invalidate currently
 	}
 
+	protected renderTopBorder(width: number, hiddenLineCount: number): string {
+		const border = hiddenLineCount > 0 ? createScrollBorder("↑", hiddenLineCount, width) : "─".repeat(width);
+		return this.borderColor(border);
+	}
+
+	protected renderBottomBorder(width: number, hiddenLineCount: number): string {
+		const border = hiddenLineCount > 0 ? createScrollBorder("↓", hiddenLineCount, width) : "─".repeat(width);
+		return this.borderColor(border);
+	}
+
 	render(width: number): string[] {
 		const maxPadding = Math.max(0, Math.floor((width - 1) / 2));
 		const paddingX = Math.min(this.paddingX, maxPadding);
@@ -472,8 +526,6 @@ export class Editor implements Component, Focusable {
 
 		// Store for cursor navigation (must match wrapping width)
 		this.lastWidth = layoutWidth;
-
-		const horizontal = this.borderColor("─");
 
 		// Layout the text
 		const layoutLines = this.layoutText(layoutWidth);
@@ -499,23 +551,14 @@ export class Editor implements Component, Focusable {
 
 		// Get visible lines slice
 		const visibleLines = layoutLines.slice(this.scrollOffset, this.scrollOffset + maxVisibleLines);
+		this.renderedVisibleLineCount = visibleLines.length;
 
 		const result: string[] = [];
 		const leftPadding = " ".repeat(paddingX);
 		const rightPadding = leftPadding;
 
 		// Render top border (with scroll indicator if scrolled down)
-		if (this.scrollOffset > 0) {
-			const indicator = `─── ↑ ${this.scrollOffset} more `;
-			const remaining = width - visibleWidth(indicator);
-			if (remaining >= 0) {
-				result.push(this.borderColor(indicator + "─".repeat(remaining)));
-			} else {
-				result.push(this.borderColor(truncateToWidth(indicator, width)));
-			}
-		} else {
-			result.push(horizontal.repeat(width));
-		}
+		result.push(this.renderTopBorder(width, this.scrollOffset));
 
 		// Render each visible layout line
 		// Emit hardware cursor marker when focused so TUI can position the
@@ -567,17 +610,13 @@ export class Editor implements Component, Focusable {
 
 		// Render bottom border (with scroll indicator if more content below)
 		const linesBelow = layoutLines.length - (this.scrollOffset + visibleLines.length);
-		if (linesBelow > 0) {
-			const indicator = `─── ↓ ${linesBelow} more `;
-			const remaining = width - visibleWidth(indicator);
-			result.push(this.borderColor(indicator + "─".repeat(Math.max(0, remaining))));
-		} else {
-			result.push(horizontal.repeat(width));
-		}
+		result.push(this.renderBottomBorder(width, linesBelow));
 
 		// Add autocomplete list if active
+		this.renderedAutocompleteHeight = 0;
 		if (this.autocompleteState && this.autocompleteList) {
 			const autocompleteResult = this.autocompleteList.render(contentWidth);
+			this.renderedAutocompleteHeight = autocompleteResult.length;
 			for (const line of autocompleteResult) {
 				const lineWidth = visibleWidth(line);
 				const linePadding = " ".repeat(Math.max(0, contentWidth - lineWidth));
@@ -586,6 +625,69 @@ export class Editor implements Component, Focusable {
 		}
 
 		return result;
+	}
+
+	handleMouse(event: TuiMouseEvent): TuiMouseEventResult | undefined {
+		const autocompleteStartRow = this.renderedVisibleLineCount + 2;
+		if (
+			this.autocompleteState &&
+			this.autocompleteList &&
+			event.y >= autocompleteStartRow &&
+			event.y < autocompleteStartRow + this.renderedAutocompleteHeight
+		) {
+			const maxPadding = Math.max(0, Math.floor((event.width - 1) / 2));
+			const paddingX = Math.min(this.paddingX, maxPadding);
+			const contentWidth = Math.max(1, event.width - paddingX * 2);
+			const result = this.autocompleteList.handleMouse?.({
+				...event,
+				x: event.x - paddingX,
+				y: event.y - autocompleteStartRow,
+				width: contentWidth,
+				height: this.renderedAutocompleteHeight,
+			});
+			return result ? { ...result, focus: true } : undefined;
+		}
+
+		// Leave press/drag/release unhandled so the renderer's screen-level text
+		// selection can run over the editor rows (drag to select, release to copy).
+		// The renderer synthesizes a click when press and release land on the same
+		// cell without movement, which is the gesture that positions the cursor.
+		if (event.type !== "click" || event.button !== "left") return undefined;
+		if (event.y <= 0 || event.y > this.renderedVisibleLineCount) return { handled: true, focus: true };
+
+		const visualLines = this.buildVisualLineMap(this.lastWidth);
+		const visualLineIndex = this.scrollOffset + event.y - 1;
+		const visualLine = visualLines[visualLineIndex];
+		if (!visualLine) return { handled: true, focus: true };
+		const logicalLine = this.state.lines[visualLine.logicalLine] ?? "";
+		const chunkEnd = visualLine.startCol + visualLine.length;
+		const chunk = logicalLine.slice(visualLine.startCol, chunkEnd);
+		const maxPadding = Math.max(0, Math.floor((event.width - 1) / 2));
+		const paddingX = Math.min(this.paddingX, maxPadding);
+		const targetColumn = Math.max(0, event.x - paddingX);
+		let visibleColumn = 0;
+		let targetIndex = chunk.length;
+		let lastGraphemeIndex = 0;
+		for (const grapheme of this.segment(chunk, "grapheme")) {
+			const nextColumn = visibleColumn + visibleWidth(grapheme.segment);
+			lastGraphemeIndex = grapheme.index;
+			if (targetColumn < nextColumn) {
+				targetIndex = grapheme.index;
+				break;
+			}
+			visibleColumn = nextColumn;
+		}
+		const isLastSegment =
+			visualLineIndex === visualLines.length - 1 ||
+			visualLines[visualLineIndex + 1]?.logicalLine !== visualLine.logicalLine;
+		if (!isLastSegment && targetIndex === chunk.length && chunk.length > 0) targetIndex = lastGraphemeIndex;
+
+		this.state.cursorLine = visualLine.logicalLine;
+		this.setCursorCol(visualLine.startCol + targetIndex);
+		this.lastAction = null;
+		this.exitHistoryBrowsing();
+		if (this.autocompleteState) this.updateAutocomplete();
+		return { handled: true, focus: true };
 	}
 
 	handleInput(data: string): void {
@@ -749,6 +851,18 @@ export class Editor implements Component, Focusable {
 		}
 		if (kb.matches(data, "tui.editor.yankPop")) {
 			this.yankPop();
+			return;
+		}
+
+		// Dedicated history actions always browse entries instead of moving the cursor.
+		if (kb.matches(data, "tui.editor.historyPrevious")) {
+			this.cancelAutocomplete();
+			this.navigateHistory(-1);
+			return;
+		}
+		if (kb.matches(data, "tui.editor.historyNext")) {
+			this.cancelAutocomplete();
+			this.navigateHistory(1);
 			return;
 		}
 
@@ -999,13 +1113,13 @@ export class Editor implements Component, Focusable {
 		this.cancelAutocomplete();
 		this.lastAction = null;
 		this.exitHistoryBrowsing();
-		this.pastes.clear();
-		this.pasteCounter = 0;
 		const normalized = this.normalizeText(text);
 		// Push undo snapshot if content differs (makes programmatic changes undoable)
 		if (this.getText() !== normalized) {
 			this.pushUndoSnapshot();
 		}
+		this.pastes.clear();
+		this.pasteCounter = 0;
 		this.setTextInternal(normalized);
 	}
 
@@ -1118,13 +1232,12 @@ export class Editor implements Component, Focusable {
 			else if (this.autocompleteTriggerCharacters.includes(char)) {
 				const currentLine = this.state.lines[this.state.cursorLine] || "";
 				const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
-				const charBeforeSymbol = textBeforeCursor[textBeforeCursor.length - 2];
-				if (textBeforeCursor.length === 1 || charBeforeSymbol === " " || charBeforeSymbol === "\t") {
+				if (this.autocompleteTriggerPattern.test(textBeforeCursor)) {
 					this.tryTriggerAutocomplete();
 				}
 			}
 			// Also auto-trigger when typing letters in a slash command or symbol completion context
-			else if (/[a-zA-Z0-9.\-_]/.test(char)) {
+			else if (/[a-zA-Z0-9.\-_]/.test(char) || cjkBreakRegex.test(char)) {
 				const currentLine = this.state.lines[this.state.cursorLine] || "";
 				const textBeforeCursor = currentLine.slice(0, this.state.cursorCol);
 				// Check if we're in a slash command (with or without space for arguments)
@@ -1284,17 +1397,21 @@ export class Editor implements Component, Focusable {
 				this.pastes.delete(targetId);
 				this.pasteCounter--;
 
-				// We got to update id of markers which are greater than the removed one
+				// Shift registry entries down in ascending id order, independent
+				// of marker order in the text ([paste #3] becomes [paste #2] when
+				// [paste #1] is removed).
+				const higherIds = [...this.pastes.keys()].filter((id) => id > targetId).sort((a, b) => a - b);
+				for (const id of higherIds) {
+					this.pastes.set(id - 1, this.pastes.get(id)!);
+					this.pastes.delete(id);
+				}
+
+				// Renumber markers with ids greater than the removed one.
 				this.state.lines = this.state.lines.map((line) =>
 					line.replace(PASTE_MARKER_REGEX, (fullMatch, idGroup, suffixGroup) => {
 						const x = Number(idGroup);
 						if (x <= targetId) return fullMatch;
-
-						// [paste #3] become [paste #2] if we remove [paste #1]
-						const newText = `[paste #${x - 1}${suffixGroup}]`;
-						this.pastes.set(x - 1, this.pastes.get(x) ?? newText);
-						this.pastes.delete(x);
-						return newText;
+						return `[paste #${x - 1}${suffixGroup}]`;
 					}),
 				);
 			}
@@ -1994,14 +2111,16 @@ export class Editor implements Component, Focusable {
 	}
 
 	private pushUndoSnapshot(): void {
-		this.undoStack.push(this.state);
+		this.undoStack.push({ state: this.state, pastes: this.pastes, pasteCounter: this.pasteCounter });
 	}
 
 	private undo(): void {
 		this.exitHistoryBrowsing();
 		const snapshot = this.undoStack.pop();
 		if (!snapshot) return;
-		Object.assign(this.state, snapshot);
+		Object.assign(this.state, snapshot.state);
+		this.pastes = snapshot.pastes;
+		this.pasteCounter = snapshot.pasteCounter;
 		this.lastAction = null;
 		this.preferredVisualCol = null;
 		if (this.onChange) {
@@ -2116,7 +2235,25 @@ export class Editor implements Component, Focusable {
 		items: Array<{ value: string; label: string; description?: string }>,
 	): SelectList {
 		const layout = prefix.startsWith("/") ? SLASH_COMMAND_SELECT_LIST_LAYOUT : undefined;
-		return new SelectList(items, this.autocompleteMaxVisible, this.theme.selectList, layout);
+		const list = new SelectList(items, this.autocompleteMaxVisible, this.theme.selectList, layout);
+		list.onSelect = (selected) => {
+			if (!this.autocompleteProvider) return;
+			this.pushUndoSnapshot();
+			this.lastAction = null;
+			const result = this.autocompleteProvider.applyCompletion(
+				this.state.lines,
+				this.state.cursorLine,
+				this.state.cursorCol,
+				selected,
+				this.autocompletePrefix,
+			);
+			this.state.lines = result.lines;
+			this.state.cursorLine = result.cursorLine;
+			this.setCursorCol(result.cursorCol);
+			this.cancelAutocomplete();
+			this.onChange?.(this.getText());
+		};
+		return list;
 	}
 
 	private tryTriggerAutocomplete(explicitTab: boolean = false): void {

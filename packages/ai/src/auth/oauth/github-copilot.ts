@@ -3,7 +3,8 @@
  */
 
 import { GITHUB_COPILOT_MODELS } from "../../providers/github-copilot.models.ts";
-import type { AuthInteraction, OAuthAuth, OAuthCredential } from "../types.ts";
+import { sleep } from "../../utils/sleep.ts";
+import type { OAuthAuth, OAuthCredential, ProviderAuthInteraction } from "../types.ts";
 import { pollOAuthDeviceCodeFlow } from "./device-code.ts";
 
 const decode = (s: string) => atob(s);
@@ -89,42 +90,108 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 	return value && typeof value === "object" ? (value as Record<string, unknown>) : undefined;
 }
 
-function isSelectableCopilotModel(item: Record<string, unknown>): boolean {
-	const policy = asRecord(item.policy);
-	const capabilities = asRecord(item.capabilities);
-	const supports = asRecord(capabilities?.supports);
-	return item.model_picker_enabled === true && policy?.state !== "disabled" && supports?.tool_calls !== false;
-}
-
-function parseAvailableCopilotModelIds(raw: unknown): string[] {
+function parseGitHubCopilotModelCatalog(raw: unknown, allowPolicyFallback: boolean) {
 	const data = asRecord(raw)?.data;
 	if (!Array.isArray(data)) {
 		throw new Error("Invalid Copilot models response");
 	}
 
-	const ids: string[] = [];
-	for (const rawItem of data) {
+	const accountModels = data.flatMap((rawItem) => {
 		const item = asRecord(rawItem);
 		const id = item?.id;
-		if (typeof id === "string" && item && isSelectableCopilotModel(item)) {
-			ids.push(id);
-		}
-	}
-	return ids;
+		if (!item || typeof id !== "string") return [];
+
+		const capabilities = asRecord(item.capabilities);
+		const supports = asRecord(capabilities?.supports);
+		if (supports?.tool_calls === false) return [];
+
+		return [
+			{
+				id,
+				pickerEnabled: item.model_picker_enabled === true,
+				policyState: asRecord(item.policy)?.state,
+			},
+		];
+	});
+	const pickerModelIds = accountModels
+		.filter((model) => model.pickerEnabled && model.policyState !== "disabled")
+		.map((model) => model.id);
+	const usePolicyFallback = allowPolicyFallback && pickerModelIds.length === 0;
+	const availableModelIds =
+		pickerModelIds.length > 0 || !allowPolicyFallback
+			? pickerModelIds
+			: accountModels.filter((model) => model.policyState === "enabled").map((model) => model.id);
+	const policyModelIds = accountModels
+		.filter(
+			(model) =>
+				model.policyState === "unconfigured" &&
+				Object.hasOwn(GITHUB_COPILOT_MODELS, model.id) &&
+				(model.pickerEnabled || usePolicyFallback),
+		)
+		.map((model) => model.id);
+	return { availableModelIds, policyModelIds };
 }
 
-async function fetchAvailableGitHubCopilotModelIds(copilotToken: string, enterpriseDomain?: string): Promise<string[]> {
+async function fetchWithRateLimitRetry(
+	url: string,
+	init: RequestInit,
+	signal: AbortSignal,
+	retryPolicy: { maxRetries: number; maxElapsedMs: number },
+): Promise<Response> {
+	const retryBudgetSignal =
+		retryPolicy.maxRetries > 0 && retryPolicy.maxElapsedMs > 0
+			? AbortSignal.timeout(retryPolicy.maxElapsedMs)
+			: undefined;
+	const requestSignal = retryBudgetSignal ? AbortSignal.any([signal, retryBudgetSignal]) : signal;
+	const retryDeadline = retryBudgetSignal ? Date.now() + retryPolicy.maxElapsedMs : undefined;
+	for (let retry = 0; ; retry++) {
+		const response = await fetch(url, {
+			...init,
+			signal: AbortSignal.any([requestSignal, AbortSignal.timeout(5000)]),
+		});
+		if (response.status !== 429 || retry === retryPolicy.maxRetries) return response;
+
+		const retryAfter = response.headers.get("retry-after");
+		let delayMs = 500 * 2 ** retry;
+		if (retryAfter) {
+			const seconds = Number.parseFloat(retryAfter);
+			delayMs = Number.isNaN(seconds) ? Date.parse(retryAfter) - Date.now() : seconds * 1000;
+			if (!Number.isFinite(delayMs)) return response;
+		}
+		delayMs = Math.max(0, delayMs);
+		if (retryDeadline !== undefined && delayMs >= retryDeadline - Date.now()) return response;
+		await response.body?.cancel();
+		await sleep(delayMs, requestSignal);
+	}
+}
+
+async function fetchGitHubCopilotModels(
+	copilotToken: string,
+	enterpriseDomain: string | undefined,
+	signal: AbortSignal,
+	retryPolicy: { maxRetries: number; maxElapsedMs: number },
+) {
 	const baseUrl = getGitHubCopilotBaseUrl(copilotToken, enterpriseDomain);
-	const raw = await fetchJson(`${baseUrl}/models`, {
-		headers: {
-			Accept: "application/json",
-			Authorization: `Bearer ${copilotToken}`,
-			...COPILOT_HEADERS,
-			"X-GitHub-Api-Version": COPILOT_API_VERSION,
+	// Some Individual accounts return false for every picker flag despite explicit enabled policies.
+	// Limit the fallback to that endpoint so other account types keep strict picker semantics.
+	const allowPolicyFallback = baseUrl === "https://api.individual.githubcopilot.com";
+	const response = await fetchWithRateLimitRetry(
+		`${baseUrl}/models`,
+		{
+			headers: {
+				Accept: "application/json",
+				Authorization: `Bearer ${copilotToken}`,
+				...COPILOT_HEADERS,
+				"X-GitHub-Api-Version": COPILOT_API_VERSION,
+			},
 		},
-		signal: AbortSignal.timeout(5000),
-	});
-	return parseAvailableCopilotModelIds(raw);
+		signal,
+		retryPolicy,
+	);
+	if (!response.ok) {
+		throw new Error(`${response.status} ${response.statusText}: ${await response.text()}`);
+	}
+	return parseGitHubCopilotModelCatalog(await response.json(), allowPolicyFallback);
 }
 
 async function fetchJson(url: string, init: RequestInit): Promise<unknown> {
@@ -136,7 +203,7 @@ async function fetchJson(url: string, init: RequestInit): Promise<unknown> {
 	return response.json();
 }
 
-async function startDeviceFlow(domain: string): Promise<DeviceCodeResponse> {
+async function startDeviceFlow(domain: string, signal: AbortSignal): Promise<DeviceCodeResponse> {
 	const urls = getUrls(domain);
 	const data = await fetchJson(urls.deviceCodeUrl, {
 		method: "POST",
@@ -149,6 +216,7 @@ async function startDeviceFlow(domain: string): Promise<DeviceCodeResponse> {
 			client_id: CLIENT_ID,
 			scope: "read:user",
 		}),
+		signal,
 	});
 
 	if (!data || typeof data !== "object") {
@@ -195,7 +263,7 @@ async function startDeviceFlow(domain: string): Promise<DeviceCodeResponse> {
 async function pollForGitHubAccessToken(
 	domain: string,
 	device: DeviceCodeResponse,
-	signal?: AbortSignal,
+	signal: AbortSignal,
 ): Promise<string> {
 	const urls = getUrls(domain);
 	return pollOAuthDeviceCodeFlow<string>({
@@ -216,6 +284,7 @@ async function pollForGitHubAccessToken(
 					device_code: device.device_code,
 					grant_type: "urn:ietf:params:oauth:grant-type:device_code",
 				}),
+				signal,
 			});
 
 			if (raw && typeof raw === "object" && typeof (raw as DeviceTokenSuccessResponse).access_token === "string") {
@@ -243,7 +312,8 @@ async function pollForGitHubAccessToken(
 
 async function refreshGitHubCopilotAccessToken(
 	refreshToken: string,
-	enterpriseDomain?: string,
+	enterpriseDomain: string | undefined,
+	signal: AbortSignal,
 ): Promise<OAuthCredential> {
 	const domain = enterpriseDomain || "github.com";
 	const urls = getUrls(domain);
@@ -254,6 +324,7 @@ async function refreshGitHubCopilotAccessToken(
 			Authorization: `Bearer ${refreshToken}`,
 			...COPILOT_HEADERS,
 		},
+		signal,
 	});
 
 	if (!raw || typeof raw !== "object") {
@@ -279,11 +350,19 @@ async function refreshGitHubCopilotAccessToken(
 /**
  * Refresh GitHub Copilot token
  */
-async function refreshGitHubCopilotToken(refreshToken: string, enterpriseDomain?: string): Promise<OAuthCredential> {
-	const credentials = await refreshGitHubCopilotAccessToken(refreshToken, enterpriseDomain);
+async function refreshGitHubCopilotToken(
+	refreshToken: string,
+	enterpriseDomain: string | undefined,
+	signal: AbortSignal,
+): Promise<OAuthCredential> {
+	const credentials = await refreshGitHubCopilotAccessToken(refreshToken, enterpriseDomain, signal);
+	const { availableModelIds } = await fetchGitHubCopilotModels(credentials.access, enterpriseDomain, signal, {
+		maxRetries: 0,
+		maxElapsedMs: 0,
+	});
 	return {
 		...credentials,
-		availableModelIds: await fetchAvailableGitHubCopilotModelIds(credentials.access, enterpriseDomain),
+		availableModelIds,
 	};
 }
 
@@ -291,55 +370,81 @@ async function refreshGitHubCopilotToken(refreshToken: string, enterpriseDomain?
  * Enable a model for the user's GitHub Copilot account.
  * This is required for some models (like Claude, Grok) before they can be used.
  */
-async function enableGitHubCopilotModel(token: string, modelId: string, enterpriseDomain?: string): Promise<boolean> {
+async function enableGitHubCopilotModel(
+	token: string,
+	modelId: string,
+	enterpriseDomain: string | undefined,
+	signal: AbortSignal,
+): Promise<boolean> {
 	const baseUrl = getGitHubCopilotBaseUrl(token, enterpriseDomain);
 	const url = `${baseUrl}/models/${modelId}/policy`;
 
+	let response: Response;
 	try {
-		const response = await fetch(url, {
-			method: "POST",
-			headers: {
-				"Content-Type": "application/json",
-				Authorization: `Bearer ${token}`,
-				...COPILOT_HEADERS,
-				"openai-intent": "chat-policy",
-				"x-interaction-type": "chat-policy",
+		response = await fetchWithRateLimitRetry(
+			url,
+			{
+				method: "POST",
+				headers: {
+					"Content-Type": "application/json",
+					Authorization: `Bearer ${token}`,
+					...COPILOT_HEADERS,
+					"openai-intent": "chat-policy",
+					"x-interaction-type": "chat-policy",
+				},
+				body: JSON.stringify({ state: "enabled" }),
 			},
-			body: JSON.stringify({ state: "enabled" }),
-		});
-		return response.ok;
-	} catch {
+			signal,
+			{ maxRetries: 2, maxElapsedMs: 5000 },
+		);
+	} catch (error) {
+		if (signal.aborted) throw error;
 		return false;
 	}
+	if (response.status === 429) {
+		throw new Error(`${response.status} ${response.statusText}: ${await response.text()}`);
+	}
+	return response.ok;
 }
 
 /**
- * Enable all known GitHub Copilot models that may require policy acceptance.
- * Called after successful login to ensure all models are available.
+ * Enable the requested GitHub Copilot models and return the successful IDs.
+ * Policy updates are best effort; exhausted rate limiting stops the batch.
  */
-async function enableAllGitHubCopilotModels(token: string, enterpriseDomain?: string): Promise<void> {
-	const models = Object.values(GITHUB_COPILOT_MODELS);
-	await Promise.all(
-		models.map(async (model) => {
-			await enableGitHubCopilotModel(token, model.id, enterpriseDomain);
-		}),
-	);
+async function enableGitHubCopilotModels(
+	token: string,
+	modelIds: readonly string[],
+	enterpriseDomain: string | undefined,
+	signal: AbortSignal,
+): Promise<string[]> {
+	const enabledModelIds: string[] = [];
+	for (const modelId of modelIds) {
+		try {
+			if (await enableGitHubCopilotModel(token, modelId, enterpriseDomain, signal)) {
+				enabledModelIds.push(modelId);
+			}
+		} catch (error) {
+			if (signal.aborted) throw error;
+			break;
+		}
+	}
+	return enabledModelIds;
 }
 
-async function loginGitHubCopilot(interaction: AuthInteraction): Promise<OAuthCredential> {
+async function loginGitHubCopilot(interaction: ProviderAuthInteraction): Promise<OAuthCredential> {
 	const input = await interaction.prompt({
 		type: "text",
 		message: "GitHub Enterprise URL/domain (blank for github.com)",
 		placeholder: "company.ghe.com",
 	});
-	if (interaction.signal?.aborted) throw new Error("Login cancelled");
+	if (interaction.signal.aborted) throw new Error("Login cancelled");
 
 	const trimmed = input.trim();
 	const enterpriseDomain = normalizeDomain(input);
 	if (trimmed && !enterpriseDomain) throw new Error("Invalid GitHub Enterprise URL/domain");
 	const domain = enterpriseDomain || "github.com";
 
-	const device = await startDeviceFlow(domain);
+	const device = await startDeviceFlow(domain, interaction.signal);
 	interaction.notify({
 		type: "device_code",
 		userCode: device.user_code,
@@ -349,12 +454,33 @@ async function loginGitHubCopilot(interaction: AuthInteraction): Promise<OAuthCr
 	});
 
 	const githubAccessToken = await pollForGitHubAccessToken(domain, device, interaction.signal);
-	const credentials = await refreshGitHubCopilotAccessToken(githubAccessToken, enterpriseDomain ?? undefined);
-	interaction.notify({ type: "progress", message: "Enabling models..." });
-	await enableAllGitHubCopilotModels(credentials.access, enterpriseDomain ?? undefined);
+	const credentials = await refreshGitHubCopilotAccessToken(
+		githubAccessToken,
+		enterpriseDomain ?? undefined,
+		interaction.signal,
+	);
+	const models = await fetchGitHubCopilotModels(
+		credentials.access,
+		enterpriseDomain ?? undefined,
+		interaction.signal,
+		{
+			maxRetries: 2,
+			maxElapsedMs: 5000,
+		},
+	);
+	let enabledModelIds: string[] = [];
+	if (models.policyModelIds.length > 0) {
+		interaction.notify({ type: "progress", message: "Enabling models..." });
+		enabledModelIds = await enableGitHubCopilotModels(
+			credentials.access,
+			models.policyModelIds,
+			enterpriseDomain ?? undefined,
+			interaction.signal,
+		);
+	}
 	return {
 		...credentials,
-		availableModelIds: await fetchAvailableGitHubCopilotModelIds(credentials.access, enterpriseDomain ?? undefined),
+		availableModelIds: [...new Set([...models.availableModelIds, ...enabledModelIds])],
 	};
 }
 
@@ -366,8 +492,10 @@ function copilotEnterpriseDomain(credential: OAuthCredential): string | undefine
 
 export const githubCopilotOAuth: OAuthAuth = {
 	name: "GitHub Copilot",
+	isSubscription: true,
 	login: loginGitHubCopilot,
-	refresh: (credential) => refreshGitHubCopilotToken(credential.refresh, copilotEnterpriseDomain(credential)),
+	refresh: (credential, signal) =>
+		refreshGitHubCopilotToken(credential.refresh, copilotEnterpriseDomain(credential), signal),
 
 	/** Derive the credential-specific proxy endpoint for each request. */
 	async toAuth(credential) {

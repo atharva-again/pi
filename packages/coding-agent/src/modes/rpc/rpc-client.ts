@@ -7,10 +7,11 @@
 import { type ChildProcess, spawn } from "node:child_process";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { ImageContent } from "@earendil-works/pi-ai";
-import type { AgentSessionEvent, SessionStats } from "../../core/agent-session.ts";
+import type { SessionStats } from "../../core/agent-session.ts";
 import type { BashResult } from "../../core/bash-executor.ts";
 import type { CompactionResult } from "../../core/compaction/index.ts";
 import type { SessionEntry, SessionTreeNode } from "../../core/session-manager.ts";
+import type { JsonAgentSessionEvent } from "../json-event.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type { RpcCommand, RpcResponse, RpcSessionState, RpcSlashCommand } from "./rpc-types.ts";
 
@@ -46,7 +47,7 @@ export interface ModelInfo {
 	reasoning: boolean;
 }
 
-export type RpcEventListener = (event: AgentSessionEvent) => void;
+export type RpcEventListener = (event: JsonAgentSessionEvent) => void;
 
 // ============================================================================
 // RPC Client
@@ -220,6 +221,14 @@ export class RpcClient {
 	}
 
 	/**
+	 * Clear queued steering and follow-up messages, returning their text.
+	 */
+	async clearQueue(): Promise<{ steering: string[]; followUp: string[] }> {
+		const response = await this.send({ type: "clear_queue" });
+		return this.getData(response);
+	}
+
+	/**
 	 * Start a new session, optionally with parent tracking.
 	 * @param parentSession - Optional parent session path for lineage tracking
 	 * @returns Object with `cancelled: true` if an extension cancelled the new session
@@ -278,6 +287,14 @@ export class RpcClient {
 	async cycleThinkingLevel(): Promise<{ level: ThinkingLevel } | null> {
 		const response = await this.send({ type: "cycle_thinking_level" });
 		return this.getData(response);
+	}
+
+	/**
+	 * Get list of available thinking levels for the current model.
+	 */
+	async getAvailableThinkingLevels(): Promise<ThinkingLevel[]> {
+		const response = await this.send({ type: "get_available_thinking_levels" });
+		return this.getData<{ levels: ThinkingLevel[] }>(response).levels;
 	}
 
 	/**
@@ -464,9 +481,9 @@ export class RpcClient {
 	/**
 	 * Collect events until agent becomes idle.
 	 */
-	collectEvents(timeout = 60000): Promise<AgentSessionEvent[]> {
+	collectEvents(timeout = 60000): Promise<JsonAgentSessionEvent[]> {
 		return new Promise((resolve, reject) => {
-			const events: AgentSessionEvent[] = [];
+			const events: JsonAgentSessionEvent[] = [];
 			const timer = setTimeout(() => {
 				unsubscribe();
 				reject(new Error(`Timeout collecting events. Stderr: ${this.stderr}`));
@@ -486,7 +503,7 @@ export class RpcClient {
 	/**
 	 * Send prompt and wait for completion, returning all events.
 	 */
-	async promptAndWait(message: string, images?: ImageContent[], timeout = 60000): Promise<AgentSessionEvent[]> {
+	async promptAndWait(message: string, images?: ImageContent[], timeout = 60000): Promise<JsonAgentSessionEvent[]> {
 		const eventsPromise = this.collectEvents(timeout);
 		await this.prompt(message, images);
 		return eventsPromise;
@@ -510,7 +527,7 @@ export class RpcClient {
 
 			// Otherwise it's an event
 			for (const listener of this.eventListeners) {
-				listener(data as AgentSessionEvent);
+				listener(data as JsonAgentSessionEvent);
 			}
 		} catch {
 			// Ignore non-JSON lines

@@ -5,7 +5,6 @@ import type {
 	Api,
 	AssistantMessage,
 	CacheRetention,
-	Context,
 	Model,
 	OpenAIResponsesCompat,
 	ProviderEnv,
@@ -13,13 +12,17 @@ import type {
 	SimpleStreamOptions,
 	StreamFunction,
 	StreamOptions,
+	TranscriptContext,
 	Usage,
 } from "../types.ts";
-import { splitDeferredTools } from "../utils/deferred-tools.ts";
 import { formatProviderError, normalizeProviderError } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { headersToRecord } from "../utils/headers.ts";
+import { getPiUserAgent } from "../utils/pi-user-agent.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
+import { retryProviderRequest } from "../utils/provider-retry.ts";
+import { getDeclaredTools, resolveTranscript, resolveTranscriptTools } from "../utils/transcript.ts";
+import { createGrammarToolInputProperties } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { clampOpenAIPromptCacheKey } from "./openai-prompt-cache.ts";
 import { convertResponsesMessages, convertResponsesTools, processResponsesStream } from "./openai-responses-shared.ts";
@@ -65,9 +68,15 @@ function resolveCacheRetention(cacheRetention?: CacheRetention, env?: ProviderEn
 function getCompat(model: Model<"openai-responses">): Required<OpenAIResponsesCompat> {
 	return {
 		supportsDeveloperRole: model.compat?.supportsDeveloperRole ?? true,
+		supportsMidConvoSystemMessages: model.compat?.supportsMidConvoSystemMessages ?? false,
 		sessionAffinityFormat: model.compat?.sessionAffinityFormat ?? detectSessionAffinityFormat(model),
 		supportsLongCacheRetention: model.compat?.supportsLongCacheRetention ?? true,
+		supportsStrictMode: model.compat?.supportsStrictMode ?? false,
+		supportsOpenAIGrammarTools: model.compat?.supportsOpenAIGrammarTools ?? false,
+		supportsAdditionalTools: model.compat?.supportsAdditionalTools ?? false,
 		supportsToolSearch: model.compat?.supportsToolSearch ?? false,
+		supportsExplicitPromptCacheMode: model.compat?.supportsExplicitPromptCacheMode ?? false,
+		supportsMaxOutputTokens: model.compat?.supportsMaxOutputTokens ?? true,
 	};
 }
 
@@ -75,11 +84,19 @@ function getPromptCacheRetention(
 	compat: Required<OpenAIResponsesCompat>,
 	cacheRetention: CacheRetention,
 ): "24h" | undefined {
-	return cacheRetention === "long" && compat.supportsLongCacheRetention ? "24h" : undefined;
+	return cacheRetention === "long" && compat.supportsLongCacheRetention && !compat.supportsExplicitPromptCacheMode
+		? "24h"
+		: undefined;
 }
 
-function formatOpenAIResponsesError(error: unknown): string {
-	return formatProviderError(normalizeProviderError(error), "OpenAI API error");
+function getPromptCacheOptions(
+	compat: Required<OpenAIResponsesCompat>,
+	cacheRetention: CacheRetention,
+): { mode?: "explicit"; ttl?: "30m" } | undefined {
+	if (!compat.supportsExplicitPromptCacheMode) return undefined;
+	if (cacheRetention === "none") return { mode: "explicit" };
+	if (cacheRetention === "long" && compat.supportsLongCacheRetention) return { ttl: "30m" };
+	return undefined;
 }
 
 // OpenAI Responses-specific options
@@ -95,10 +112,11 @@ export interface OpenAIResponsesOptions extends StreamOptions {
  */
 export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> = (
 	model: Model<"openai-responses">,
-	context: Context,
+	context: TranscriptContext,
 	options?: OpenAIResponsesOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
+	const normalizedContext = resolveTranscript(context, getCompat(model).supportsMidConvoSystemMessages);
 
 	// Start async processing
 	(async () => {
@@ -116,7 +134,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				totalTokens: 0,
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
-			stopReason: "stop",
+			stopReason: "pending",
 			timestamp: Date.now(),
 		};
 
@@ -125,8 +143,20 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			const apiKey = getClientApiKey(model.provider, options?.apiKey, options?.headers);
 			const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
 			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
-			const client = createClient(model, context, apiKey, options?.headers, cacheSessionId);
-			let params = buildParams(model, context, options);
+			const compat = getCompat(model);
+			const grammarToolInputProperties = createGrammarToolInputProperties(
+				getDeclaredTools(normalizedContext.messages),
+				compat.supportsOpenAIGrammarTools,
+			);
+			const client = createClient(
+				model,
+				normalizedContext,
+				apiKey,
+				options?.headers,
+				options?.fetch,
+				cacheSessionId,
+			);
+			let params = buildParams(model, normalizedContext, options, compat, grammarToolInputProperties);
 			const nextParams = await options?.onPayload?.(params, model);
 			if (nextParams !== undefined) {
 				params = nextParams as ResponseCreateParamsStreaming;
@@ -134,14 +164,22 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			const requestOptions = {
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
-				maxRetries: options?.maxRetries ?? 0,
+				maxRetries: 0,
 			};
-			const { data: openaiStream, response } = await client.responses.create(params, requestOptions).withResponse();
+			const { data: openaiStream, response } = await retryProviderRequest(
+				() => client.responses.create(params, requestOptions).withResponse(),
+				{
+					maxRetries: options?.maxRetries,
+					maxRetryDelayMs: options?.maxRetryDelayMs,
+					signal: options?.signal,
+				},
+			);
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
 			await processResponsesStream(openaiStream, output, stream, model, {
 				serviceTier: options?.serviceTier,
+				grammarToolInputProperties,
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
 			});
 
@@ -149,8 +187,11 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 				throw new Error("Request was aborted");
 			}
 
+			if (output.stopReason === "pending") {
+				throw new Error("OpenAI Responses stream ended without a stop reason");
+			}
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
-				throw new Error("An unknown error occurred");
+				throw new Error(output.errorMessage || "An unknown error occurred");
 			}
 
 			stream.push({ type: "done", reason: output.stopReason, message: output });
@@ -158,11 +199,15 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 		} catch (error) {
 			for (const block of output.content) {
 				delete (block as { index?: number }).index;
-				// partialJson is only a streaming scratch buffer; never persist it.
+				// Streaming scratch buffers are only used during parsing; never persist them.
 				delete (block as { partialJson?: string }).partialJson;
+				delete (block as { customInput?: unknown }).customInput;
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = formatOpenAIResponsesError(error);
+			output.errorMessage = formatProviderError(
+				normalizeProviderError(error),
+				`${model.provider === "openai" ? "OpenAI" : model.provider} API error`,
+			);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		}
@@ -173,12 +218,15 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 
 export const streamSimple: StreamFunction<"openai-responses", SimpleStreamOptions> = (
 	model: Model<"openai-responses">,
-	context: Context,
+	context: TranscriptContext,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
 	getClientApiKey(model.provider, options?.apiKey, options?.headers);
 
-	const base = buildBaseOptions(model, context, options, options?.apiKey);
+	const base = {
+		...buildBaseOptions(model, context, options, options?.apiKey),
+		toolChoice: options?.toolChoice,
+	} satisfies OpenAIResponsesOptions;
 	const clampedReasoning = options?.reasoning ? clampThinkingLevel(model, options.reasoning) : undefined;
 	const reasoningEffort = clampedReasoning === "off" ? undefined : clampedReasoning;
 
@@ -190,13 +238,14 @@ export const streamSimple: StreamFunction<"openai-responses", SimpleStreamOption
 
 function createClient(
 	model: Model<"openai-responses">,
-	context: Context,
+	context: TranscriptContext,
 	apiKey: string,
 	optionsHeaders?: ProviderHeaders,
+	fetch?: typeof globalThis.fetch,
 	sessionId?: string,
 ) {
 	const compat = getCompat(model);
-	const headers: ProviderHeaders = { ...model.headers };
+	const headers: ProviderHeaders = { "User-Agent": getPiUserAgent(), ...model.headers };
 	if (model.provider === "github-copilot") {
 		const hasImages = hasCopilotVisionInput(context.messages);
 		const copilotHeaders = buildCopilotDynamicHeaders({
@@ -226,28 +275,50 @@ function createClient(
 		apiKey,
 		baseURL: model.baseUrl,
 		dangerouslyAllowBrowser: true,
+		fetch,
 		defaultHeaders: headers,
 	});
 }
 
-function buildParams(model: Model<"openai-responses">, context: Context, options?: OpenAIResponsesOptions) {
-	const compat = getCompat(model);
-	const toolPlacement = splitDeferredTools(context, compat.supportsToolSearch);
+function buildParams(
+	model: Model<"openai-responses">,
+	context: TranscriptContext,
+	options: OpenAIResponsesOptions | undefined,
+	compat: Required<OpenAIResponsesCompat> = getCompat(model),
+	grammarToolInputProperties: ReadonlyMap<string, string> = createGrammarToolInputProperties(
+		getDeclaredTools(context.messages),
+		compat.supportsOpenAIGrammarTools,
+	),
+) {
+	const transcriptTools = resolveTranscriptTools(
+		context.messages,
+		compat.supportsAdditionalTools || compat.supportsToolSearch,
+	);
 	const messages = convertResponsesMessages(model, context, OPENAI_TOOL_CALL_PROVIDERS, {
-		deferredTools: toolPlacement.deferred,
+		grammarToolInputProperties,
+		supportsMidConvoSystemMessages: compat.supportsMidConvoSystemMessages,
+		supportsAdditionalTools: compat.supportsAdditionalTools,
+		supportsToolSearch: compat.supportsToolSearch,
+		toolOptions: {
+			supportsStrictMode: compat.supportsStrictMode,
+			supportsOpenAIGrammarTools: compat.supportsOpenAIGrammarTools,
+		},
 	});
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
-	const params: ResponseCreateParamsStreaming = {
+	const params: ResponseCreateParamsStreaming & {
+		prompt_cache_options?: { mode?: "explicit"; ttl?: "30m" };
+	} = {
 		model: model.id,
 		input: messages,
 		stream: true,
 		prompt_cache_key: cacheRetention === "none" ? undefined : clampOpenAIPromptCacheKey(options?.sessionId),
 		prompt_cache_retention: getPromptCacheRetention(compat, cacheRetention),
+		prompt_cache_options: getPromptCacheOptions(compat, cacheRetention),
 		store: false,
 	};
 
-	if (options?.maxTokens) {
+	if (options?.maxTokens && compat.supportsMaxOutputTokens) {
 		params.max_output_tokens = Math.max(options.maxTokens, OPENAI_RESPONSES_MIN_OUTPUT_TOKENS);
 	}
 
@@ -259,8 +330,11 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 		params.service_tier = options.serviceTier;
 	}
 
-	if (toolPlacement.immediate.length > 0) {
-		params.tools = convertResponsesTools(toolPlacement.immediate);
+	if (transcriptTools.requestTools.length > 0) {
+		params.tools = convertResponsesTools(transcriptTools.requestTools, {
+			supportsStrictMode: compat.supportsStrictMode,
+			supportsOpenAIGrammarTools: compat.supportsOpenAIGrammarTools,
+		});
 	}
 
 	if (options?.toolChoice !== undefined) {
@@ -283,6 +357,11 @@ function buildParams(model: Model<"openai-responses">, context: Context, options
 			};
 		}
 		if (model.provider === "xai") params.include = ["reasoning.encrypted_content"];
+	}
+
+	// Last so custom keys override the named request fields.
+	if (options?.samplingParams) {
+		Object.assign(params, options.samplingParams);
 	}
 
 	return params;

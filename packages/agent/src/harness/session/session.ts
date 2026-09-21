@@ -1,338 +1,475 @@
-import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
+import { uuidv7 } from "@earendil-works/pi-ai/utils/uuid";
 import type { AgentMessage } from "../../types.ts";
-import { createBranchSummaryMessage, createCompactionSummaryMessage, createCustomMessage } from "../messages.ts";
+import type { Context } from "../context.ts";
+import { insertEntry } from "./commit.ts";
+import { MutationLine } from "./mutation-line.ts";
 import type {
-	ActiveToolsChangeEntry,
-	BranchSummaryEntry,
-	CompactionEntry,
-	CustomEntry,
-	CustomMessageEntry,
-	LabelEntry,
-	MessageEntry,
-	ModelChangeEntry,
-	SessionContext,
-	SessionInfoEntry,
+	Branch,
+	BranchScan,
+	CommitResult,
+	Entry,
+	EntryQuery,
+	IdGenerator,
+	JsonValue,
+	Session,
 	SessionMetadata,
-	SessionStorage,
-	SessionTreeEntry,
-	ThinkingLevelChangeEntry,
-} from "../types.ts";
-import { SessionError } from "../types.ts";
+	SessionMutation,
+	SessionMutationCallback,
+	SessionStats,
+	Storage,
+	StorageBranchScan,
+	Write,
+} from "./types.ts";
+import {
+	appendList as appendListWrite,
+	branchTip,
+	deleteList as deleteListWrite,
+	deleteValue as deleteValueWrite,
+	entryLabel,
+	type ListElement,
+	type ListReadOptions,
+	type StoredValue,
+	sessionName,
+	setValue as setValueWrite,
+	type Value,
+	type ValueList,
+} from "./values.ts";
 
-export type ContextEntryTransform = (entries: readonly SessionTreeEntry[]) => readonly SessionTreeEntry[];
-
-export type CustomEntryContextMessageProjector = (
-	entry: CustomEntry,
-	index: number,
-	entries: readonly SessionTreeEntry[],
-) => readonly AgentMessage[] | undefined;
-
-export interface SessionContextBuildOptions {
-	/** Additional entry transforms applied after the default compaction transform. */
-	entryTransforms?: readonly ContextEntryTransform[];
-	/** Optional custom-entry projectors. Custom entries are omitted from model context by default. */
-	entryProjectors?: Readonly<Record<string, CustomEntryContextMessageProjector>>;
+export interface StorageBackedSessionOptions {
+	mutationLine?: MutationLine;
+	idGenerator?: IdGenerator;
+	onClose?: () => void;
 }
 
-function deriveSessionContextState(pathEntries: readonly SessionTreeEntry[]): Omit<SessionContext, "messages"> {
-	let thinkingLevel = "off";
-	let model: { provider: string; modelId: string } | null = null;
-	let activeToolNames: string[] | null = null;
-
-	for (const entry of pathEntries) {
-		if (entry.type === "thinking_level_change") {
-			thinkingLevel = entry.thinkingLevel;
-		} else if (entry.type === "model_change") {
-			model = { provider: entry.provider, modelId: entry.modelId };
-		} else if (entry.type === "message" && entry.message.role === "assistant") {
-			model = { provider: entry.message.provider, modelId: entry.message.model };
-		} else if (entry.type === "active_tools_change") {
-			activeToolNames = [...entry.activeToolNames];
-		}
+/** Durable session state is internally inconsistent and cannot be safely advanced. */
+export class SessionInvariantError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = "SessionInvariantError";
 	}
-
-	return { thinkingLevel, model, activeToolNames };
 }
 
-export function defaultContextEntryTransform(pathEntries: readonly SessionTreeEntry[]): SessionTreeEntry[] {
-	let compaction: CompactionEntry | null = null;
-	for (const entry of pathEntries) {
-		if (entry.type === "compaction") {
-			compaction = entry;
-		}
-	}
-	if (!compaction) {
-		return [...pathEntries];
-	}
+/** A requested Branch name is invalid. */
+export class SessionInvalidBranchError extends Error {
+	readonly branch: string;
+	readonly reason: string;
 
-	const entries: SessionTreeEntry[] = [compaction];
-	const compactionIdx = pathEntries.findIndex((entry) => entry.type === "compaction" && entry.id === compaction.id);
-	let foundFirstKept = false;
-	for (let i = 0; i < compactionIdx; i++) {
-		const entry = pathEntries[i]!;
-		if (entry.id === compaction.firstKeptEntryId) foundFirstKept = true;
-		if (foundFirstKept) entries.push(entry);
+	constructor(branch: string, reason: string) {
+		super(`Invalid branch ${JSON.stringify(branch)}: ${reason}`);
+		this.name = "SessionInvalidBranchError";
+		this.branch = branch;
+		this.reason = reason;
 	}
-	for (let i = compactionIdx + 1; i < pathEntries.length; i++) {
-		entries.push(pathEntries[i]!);
-	}
-	return entries;
 }
 
-export function buildContextEntries(
-	pathEntries: readonly SessionTreeEntry[],
-	options: SessionContextBuildOptions = {},
-): SessionTreeEntry[] {
-	let entries = defaultContextEntryTransform(pathEntries);
-	for (const transform of options.entryTransforms ?? []) {
-		entries = [...transform(entries)];
+/** A requested branch already exists. */
+export class SessionBranchExistsError extends Error {
+	readonly branch: string;
+
+	constructor(branch: string) {
+		super(`Branch already exists: ${branch}`);
+		this.name = "SessionBranchExistsError";
+		this.branch = branch;
 	}
-	return entries;
 }
 
-export function sessionEntryToContextMessages(
-	entry: SessionTreeEntry,
-	index: number,
-	entries: readonly SessionTreeEntry[],
-	options: SessionContextBuildOptions = {},
-): AgentMessage[] {
-	if (entry.type === "message") {
-		return [entry.message as AgentMessage];
+/** A pending assistant message cannot be persisted as a session entry. */
+export class SessionPendingAssistantMessageError extends Error {
+	constructor() {
+		super("Cannot persist a pending assistant message");
+		this.name = "SessionPendingAssistantMessageError";
 	}
-	if (entry.type === "custom_message") {
-		return [
-			createCustomMessage(
-				entry.customType,
-				entry.content as string | (TextContent | ImageContent)[],
-				entry.display,
-				entry.details,
-				entry.timestamp,
-			),
-		];
-	}
-	if (entry.type === "compaction") {
-		return [createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp)];
-	}
-	if (entry.type === "branch_summary" && entry.summary) {
-		return [createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp)];
-	}
-	if (entry.type === "custom") {
-		return [...(options.entryProjectors?.[entry.customType]?.(entry, index, entries) ?? [])];
-	}
-	return [];
 }
 
-export function buildSessionContext(
-	pathEntries: readonly SessionTreeEntry[],
-	options: SessionContextBuildOptions = {},
-): SessionContext {
-	const state = deriveSessionContextState(pathEntries);
-	const contextEntries = buildContextEntries(pathEntries, options);
-	const messages = contextEntries.flatMap((entry, index) =>
-		sessionEntryToContextMessages(entry, index, contextEntries, options),
-	);
-	return { ...state, messages };
+/** A requested session entry target does not exist. */
+export class SessionUnknownTargetError extends Error {
+	readonly targetId: string;
+
+	constructor(targetId: string) {
+		super(`Unknown target: ${targetId}`);
+		this.name = "SessionUnknownTargetError";
+		this.targetId = targetId;
+	}
 }
 
-export class Session<TMetadata extends SessionMetadata = SessionMetadata> {
-	private storage: SessionStorage<TMetadata>;
-	private contextBuildOptions: SessionContextBuildOptions;
+class StorageBackedSessionMutation implements SessionMutation {
+	private readonly storage: Storage;
+	private readonly release: () => void;
+	private active = true;
+	private commitResult: Promise<CommitResult> | undefined;
+	private endPromise: Promise<void> | undefined;
 
-	constructor(storage: SessionStorage<TMetadata>, contextBuildOptions: SessionContextBuildOptions = {}) {
+	constructor(storage: Storage, release: () => void) {
 		this.storage = storage;
-		this.contextBuildOptions = contextBuildOptions;
+		this.release = release;
 	}
 
-	getMetadata(): Promise<TMetadata> {
-		return this.storage.getMetadata();
+	commit(writes: Write[], context: Context): Promise<CommitResult> {
+		this.assertActive();
+		if (this.commitResult !== undefined) return Promise.reject(new Error("SessionMutator commit already attempted"));
+		try {
+			for (const write of writes) {
+				if (
+					write.kind === "entry" &&
+					write.entry.type === "message" &&
+					write.entry.message.role === "assistant" &&
+					write.entry.message.stopReason === "pending"
+				) {
+					throw new SessionPendingAssistantMessageError();
+				}
+			}
+			this.commitResult = this.storage.commit(writes, context);
+		} catch (error) {
+			this.commitResult = Promise.reject(error);
+		}
+		return this.commitResult;
 	}
 
-	getStorage(): SessionStorage<TMetadata> {
-		return this.storage;
+	end(_context: Context): Promise<void> {
+		if (this.endPromise !== undefined) return this.endPromise;
+		this.active = false;
+		this.endPromise = this.settle().finally(this.release);
+		return this.endPromise;
 	}
 
-	getLeafId(): Promise<string | null> {
-		return this.storage.getLeafId();
+	getEntries(ids: string[], context: Context): Promise<Map<string, Entry>> {
+		this.assertActive();
+		return this.storage.getEntries(ids, context);
 	}
 
-	getEntry(id: string): Promise<SessionTreeEntry | undefined> {
-		return this.storage.getEntry(id);
+	getStats(context: Context): Promise<SessionStats> {
+		this.assertActive();
+		return this.storage.getStats(context);
 	}
 
-	getEntries(): Promise<SessionTreeEntry[]> {
-		return this.storage.getEntries();
+	getValue<T>(address: Value<T>, context: Context): Promise<StoredValue<T> | undefined> {
+		this.assertActive();
+		return this.storage.getValue(address, context);
 	}
 
-	async getBranch(fromId?: string): Promise<SessionTreeEntry[]> {
-		const leafId = fromId ?? (await this.storage.getLeafId());
-		return this.storage.getPathToRoot(leafId);
+	scanValues<T>(prefix: Value<T>, context: Context): Promise<StoredValue<T>[]> {
+		this.assertActive();
+		return this.storage.scanValues(prefix, context);
 	}
 
-	async buildContextEntries(options: SessionContextBuildOptions = {}): Promise<SessionTreeEntry[]> {
-		return buildContextEntries(await this.getBranch(), this.mergeContextBuildOptions(options));
+	readList<T>(
+		address: ValueList<T>,
+		options: ListReadOptions | undefined,
+		context: Context,
+	): Promise<ListElement<T>[]> {
+		this.assertActive();
+		return this.storage.readList(address, options, context);
 	}
 
-	async buildContext(options: SessionContextBuildOptions = {}): Promise<SessionContext> {
-		return buildSessionContext(await this.getBranch(), this.mergeContextBuildOptions(options));
+	scanBranch(query: StorageBranchScan, context: Context): Promise<Entry[]> {
+		this.assertActive();
+		return this.storage.scanBranch(query, context);
 	}
 
-	private mergeContextBuildOptions(options: SessionContextBuildOptions): SessionContextBuildOptions {
-		return {
-			entryTransforms: [...(this.contextBuildOptions.entryTransforms ?? []), ...(options.entryTransforms ?? [])],
-			entryProjectors: {
-				...(this.contextBuildOptions.entryProjectors ?? {}),
-				...(options.entryProjectors ?? {}),
+	private settle(): Promise<void> {
+		return (
+			this.commitResult?.then(
+				() => undefined,
+				() => undefined,
+			) ?? Promise.resolve()
+		);
+	}
+
+	private assertActive(): void {
+		if (!this.active) throw new Error("SessionMutator cannot be used outside its mutation callback");
+	}
+}
+
+class StorageBackedBranch implements Branch {
+	readonly name: string;
+	private readonly session: StorageBackedSession;
+
+	constructor(name: string, session: StorageBackedSession) {
+		this.name = name;
+		this.session = session;
+	}
+
+	getTipId(context: Context): Promise<string | null> {
+		return this.session.getBranchTip(this.name, context);
+	}
+
+	async findEntries(query: BranchScan | undefined, context: Context): Promise<Entry[]> {
+		query ??= {};
+		const start = query.start ?? (await this.getTipId(context));
+		if (start === null) return [];
+		return this.session.scanBranch({ ...query, start, order: query.order ?? "newestFirst" }, context);
+	}
+
+	async findEntry(query: BranchScan | undefined, context: Context): Promise<Entry | undefined> {
+		query ??= {};
+		return (
+			await this.findEntries({ ...query, limit: query.limit === undefined ? 1 : Math.min(query.limit, 1) }, context)
+		)[0];
+	}
+
+	appendMessage(message: AgentMessage, context: Context): Promise<string> {
+		return this.session.appendToBranch(this.name, { type: "message", message }, context);
+	}
+
+	appendCustomEntry(customType: string, data: JsonValue | undefined, context: Context): Promise<string> {
+		return this.session.appendToBranch(
+			this.name,
+			{ type: "custom", customType, ...(data === undefined ? {} : { data }) },
+			context,
+		);
+	}
+}
+
+/** Package-internal typed boundary shared by concrete session repositories. */
+export class StorageBackedSession<TMetadata extends SessionMetadata = SessionMetadata> implements Session<TMetadata> {
+	readonly metadata: TMetadata;
+	readonly idGenerator: IdGenerator;
+	private readonly storage: Storage;
+	private readonly mutationLine: MutationLine;
+	private readonly onClose: (() => void) | undefined;
+	private readonly branches = new Map<string, StorageBackedBranch>();
+	private readonly closedError = new Error("Session is closed");
+	private state: "open" | "closing" | "closed" = "open";
+	private closePromise: Promise<void> | undefined;
+
+	constructor(metadata: TMetadata, storage: Storage, options: StorageBackedSessionOptions = {}) {
+		this.metadata = metadata;
+		this.idGenerator = options.idGenerator ?? { next: uuidv7 };
+		this.storage = storage;
+		this.mutationLine = options.mutationLine ?? new MutationLine();
+		this.onClose = options.onClose;
+	}
+
+	async beginMutation(_context: Context): Promise<SessionMutation> {
+		this.assertOpen();
+		let grant!: (mutation: SessionMutation) => void;
+		let rejectGrant!: (error: unknown) => void;
+		const granted = new Promise<SessionMutation>((resolve, reject) => {
+			grant = resolve;
+			rejectGrant = reject;
+		});
+		let release!: () => void;
+		const finished = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const line = this.mutationLine.run(async () => {
+			grant(new StorageBackedSessionMutation(this.storage, release));
+			await finished;
+		});
+		void line.catch(rejectGrant);
+		return granted;
+	}
+
+	async mutate<T>(mutation: SessionMutationCallback<T>, context: Context): Promise<T> {
+		const mutator = await this.beginMutation(context);
+		try {
+			return await mutation(mutator, context);
+		} finally {
+			await mutator.end(context);
+		}
+	}
+
+	async getEntries(ids: string[], context: Context): Promise<Map<string, Entry>> {
+		this.assertOpen();
+		return this.storage.getEntries(ids, context);
+	}
+
+	async getEntry(id: string, context: Context): Promise<Entry | undefined> {
+		return (await this.getEntries([id], context)).get(id);
+	}
+
+	async getValue<T>(address: Value<T>, context: Context): Promise<StoredValue<T> | undefined> {
+		this.assertOpen();
+		return this.storage.getValue(address, context);
+	}
+
+	async scanValues<T>(prefix: Value<T>, context: Context): Promise<StoredValue<T>[]> {
+		this.assertOpen();
+		return this.storage.scanValues(prefix, context);
+	}
+
+	async readList<T>(
+		address: ValueList<T>,
+		options: ListReadOptions | undefined,
+		context: Context,
+	): Promise<ListElement<T>[]> {
+		this.assertOpen();
+		return this.storage.readList(address, options, context);
+	}
+
+	async scanBranch(query: StorageBranchScan, context: Context): Promise<Entry[]> {
+		this.assertOpen();
+		return this.storage.scanBranch(query, context);
+	}
+
+	async getStats(context: Context): Promise<SessionStats> {
+		this.assertOpen();
+		return this.storage.getStats(context);
+	}
+
+	async getName(context: Context): Promise<string | undefined> {
+		return (await this.getValue(sessionName, context))?.value;
+	}
+
+	async getLabel(targetId: string, context: Context): Promise<string | undefined> {
+		return (await this.getValue(entryLabel(targetId), context))?.value;
+	}
+
+	async findEntries(query: EntryQuery | undefined, context: Context): Promise<Entry[]> {
+		query ??= {};
+		this.assertOpen();
+		const order = query.order ?? "desc";
+		if (query.cursor !== undefined) {
+			if (order === "asc" && query.cursor.seq === Number.MAX_SAFE_INTEGER) return [];
+			if (order === "desc" && query.cursor.seq <= 1) return [];
+		}
+		return this.storage.scanEntries(
+			{
+				type: query.type,
+				customType: query.customType,
+				order,
+				limit: query.limit,
+				...(query.cursor === undefined
+					? {}
+					: order === "asc"
+						? { fromSeq: query.cursor.seq + 1 }
+						: { toSeq: query.cursor.seq - 1 }),
 			},
-		};
+			context,
+		);
 	}
 
-	getLabel(id: string): Promise<string | undefined> {
-		return this.storage.getLabel(id);
+	async findEntry(query: EntryQuery | undefined, context: Context): Promise<Entry | undefined> {
+		query ??= {};
+		return (
+			await this.findEntries({ ...query, limit: query.limit === undefined ? 1 : Math.min(query.limit, 1) }, context)
+		)[0];
 	}
 
-	async getSessionName(): Promise<string | undefined> {
-		const entries = await this.storage.findEntries("session_info");
-		return entries[entries.length - 1]?.name?.trim() || undefined;
+	async branch(name: string, context: Context): Promise<Branch | undefined> {
+		this.assertValidBranchName(name);
+		if ((await this.getValue(branchTip(name), context)) === undefined) return undefined;
+		return this.getOrCreateBranchObject(name);
 	}
 
-	private async appendTypedEntry<TEntry extends SessionTreeEntry>(entry: TEntry): Promise<string> {
-		await this.storage.appendEntry(entry);
-		return entry.id;
+	async createBranch(name: string, at: string | null, context: Context): Promise<Branch> {
+		this.assertOpen();
+		this.assertValidBranchName(name);
+		await this.mutate(async (mutator) => {
+			if ((await mutator.getValue(branchTip(name), context)) !== undefined) {
+				throw new SessionBranchExistsError(name);
+			}
+			if (at !== null && !(await mutator.getEntries([at], context)).has(at)) {
+				throw new SessionUnknownTargetError(at);
+			}
+			await mutator.commit([setValueWrite(branchTip(name), at)], context);
+		}, context);
+		return this.getOrCreateBranchObject(name);
 	}
 
-	async appendMessage(message: AgentMessage): Promise<string> {
-		return this.appendTypedEntry({
-			type: "message",
-			id: await this.storage.createEntryId(),
-			parentId: await this.storage.getLeafId(),
-			timestamp: new Date().toISOString(),
-			message,
-		} satisfies MessageEntry);
+	setValue<T>(address: Value<T>, next: NoInfer<T>, context: Context): Promise<void> {
+		return this.mutate(async (mutator) => {
+			await mutator.commit([setValueWrite(address, next)], context);
+		}, context);
 	}
 
-	async appendThinkingLevelChange(thinkingLevel: string): Promise<string> {
-		return this.appendTypedEntry({
-			type: "thinking_level_change",
-			id: await this.storage.createEntryId(),
-			parentId: await this.storage.getLeafId(),
-			timestamp: new Date().toISOString(),
-			thinkingLevel,
-		} satisfies ThinkingLevelChangeEntry);
+	deleteValue<T>(address: Value<T>, context: Context): Promise<void> {
+		return this.mutate(async (mutator) => {
+			await mutator.commit([deleteValueWrite(address)], context);
+		}, context);
 	}
 
-	async appendModelChange(provider: string, modelId: string): Promise<string> {
-		return this.appendTypedEntry({
-			type: "model_change",
-			id: await this.storage.createEntryId(),
-			parentId: await this.storage.getLeafId(),
-			timestamp: new Date().toISOString(),
-			provider,
-			modelId,
-		} satisfies ModelChangeEntry);
+	appendList<T>(address: ValueList<T>, element: NoInfer<T>, context: Context): Promise<void> {
+		return this.mutate(async (mutator) => {
+			await mutator.commit([appendListWrite(address, element)], context);
+		}, context);
 	}
 
-	async appendActiveToolsChange(activeToolNames: string[]): Promise<string> {
-		return this.appendTypedEntry({
-			type: "active_tools_change",
-			id: await this.storage.createEntryId(),
-			parentId: await this.storage.getLeafId(),
-			timestamp: new Date().toISOString(),
-			activeToolNames: [...activeToolNames],
-		} satisfies ActiveToolsChangeEntry);
+	deleteList<T>(address: ValueList<T>, context: Context): Promise<void> {
+		return this.mutate(async (mutator) => {
+			await mutator.commit([deleteListWrite(address)], context);
+		}, context);
 	}
 
-	async appendCompaction<T = unknown>(
-		summary: string,
-		firstKeptEntryId: string,
-		tokensBefore: number,
-		details?: T,
-		fromHook?: boolean,
+	setName(name: string | undefined, context: Context): Promise<void> {
+		return name === undefined ? this.deleteValue(sessionName, context) : this.setValue(sessionName, name, context);
+	}
+
+	setLabel(targetId: string, label: string | undefined, context: Context): Promise<void> {
+		const address = entryLabel(targetId);
+		return label === undefined ? this.deleteValue(address, context) : this.setValue(address, label, context);
+	}
+
+	close(context: Context): Promise<void> {
+		if (this.closePromise !== undefined) return this.closePromise;
+		this.state = "closing";
+		this.closePromise = this.mutationLine
+			.seal(this.closedError)
+			.then(() => this.storage.close(context))
+			.finally(() => {
+				this.state = "closed";
+				this.onClose?.();
+			});
+		return this.closePromise;
+	}
+
+	async getBranchTip(name: string, context: Context): Promise<string | null> {
+		const stored = await this.getValue(branchTip(name), context);
+		if (stored === undefined) throw new SessionInvariantError(`Unknown branch: ${name}`);
+		return stored.value;
+	}
+
+	async appendToBranch(
+		name: string,
+		entry: { type: "message"; message: AgentMessage } | { type: "custom"; customType: string; data?: JsonValue },
+		context: Context,
 	): Promise<string> {
-		return this.appendTypedEntry({
-			type: "compaction",
-			id: await this.storage.createEntryId(),
-			parentId: await this.storage.getLeafId(),
-			timestamp: new Date().toISOString(),
-			summary,
-			firstKeptEntryId,
-			tokensBefore,
-			details,
-			fromHook,
-		} satisfies CompactionEntry<T>);
-	}
-
-	async appendCustomEntry(customType: string, data?: unknown): Promise<string> {
-		return this.appendTypedEntry({
-			type: "custom",
-			id: await this.storage.createEntryId(),
-			parentId: await this.storage.getLeafId(),
-			timestamp: new Date().toISOString(),
-			customType,
-			data,
-		} satisfies CustomEntry);
-	}
-
-	async appendCustomMessageEntry<T = unknown>(
-		customType: string,
-		content: string | (TextContent | ImageContent)[],
-		display: boolean,
-		details?: T,
-	): Promise<string> {
-		return this.appendTypedEntry({
-			type: "custom_message",
-			id: await this.storage.createEntryId(),
-			parentId: await this.storage.getLeafId(),
-			timestamp: new Date().toISOString(),
-			customType,
-			content,
-			display,
-			details,
-		} satisfies CustomMessageEntry<T>);
-	}
-
-	async appendLabel(targetId: string, label: string | undefined): Promise<string> {
-		if (!(await this.storage.getEntry(targetId))) {
-			throw new SessionError("not_found", `Entry ${targetId} not found`);
+		this.assertOpen();
+		if (entry.type === "message" && entry.message.role === "assistant" && entry.message.stopReason === "pending") {
+			throw new SessionPendingAssistantMessageError();
 		}
-		return this.appendTypedEntry({
-			type: "label",
-			id: await this.storage.createEntryId(),
-			parentId: await this.storage.getLeafId(),
-			timestamp: new Date().toISOString(),
-			targetId,
-			label,
-		} satisfies LabelEntry);
+		const id = this.idGenerator.next();
+		await this.mutate(async (mutator) => {
+			const tip = await mutator.getValue(branchTip(name), context);
+			if (tip === undefined) throw new SessionInvariantError(`Unknown branch: ${name}`);
+			await mutator.commit(
+				[
+					insertEntry(
+						entry.type === "message"
+							? { id, parentId: tip.value, type: "message", message: entry.message }
+							: {
+									id,
+									parentId: tip.value,
+									type: "custom",
+									customType: entry.customType,
+									...(entry.data === undefined ? {} : { data: entry.data }),
+								},
+					),
+					setValueWrite(branchTip(name), id),
+				],
+				context,
+			);
+		}, context);
+		return id;
 	}
 
-	async appendSessionName(name: string): Promise<string> {
-		const sanitizedName = name.replace(/[\r\n]+/g, " ").trim();
-		return this.appendTypedEntry({
-			type: "session_info",
-			id: await this.storage.createEntryId(),
-			parentId: await this.storage.getLeafId(),
-			timestamp: new Date().toISOString(),
-			name: sanitizedName,
-		} satisfies SessionInfoEntry);
-	}
-
-	async moveTo(
-		entryId: string | null,
-		summary?: { summary: string; details?: unknown; fromHook?: boolean },
-	): Promise<string | undefined> {
-		if (entryId !== null && !(await this.storage.getEntry(entryId))) {
-			throw new SessionError("not_found", `Entry ${entryId} not found`);
+	private getOrCreateBranchObject(name: string): Branch {
+		let branch = this.branches.get(name);
+		if (branch === undefined) {
+			branch = new StorageBackedBranch(name, this);
+			this.branches.set(name, branch);
 		}
-		await this.storage.setLeafId(entryId);
-		if (!summary) return undefined;
-		return this.appendTypedEntry({
-			type: "branch_summary",
-			id: await this.storage.createEntryId(),
-			parentId: entryId,
-			timestamp: new Date().toISOString(),
-			fromId: entryId ?? "root",
-			summary: summary.summary,
-			details: summary.details,
-			fromHook: summary.fromHook,
-		} satisfies BranchSummaryEntry);
+		return branch;
+	}
+
+	private assertValidBranchName(name: string): void {
+		if (name.length === 0) throw new SessionInvalidBranchError(name, "branch name must not be empty");
+		if (name.includes("\u0000")) {
+			throw new SessionInvalidBranchError(name, "branch name must not contain \\u0000");
+		}
+	}
+
+	private assertOpen(): void {
+		if (this.state !== "open") throw this.closedError;
 	}
 }

@@ -11,6 +11,7 @@ import type {
 	OpenAICompletionsCompat,
 	Usage,
 } from "../src/types.ts";
+import { normalizeContext } from "../src/utils/transcript.ts";
 
 const emptyUsage: Usage = {
 	input: 0,
@@ -26,6 +27,7 @@ const compat = {
 	supportsDeveloperRole: true,
 	supportsReasoningEffort: true,
 	supportsUsageInStreaming: true,
+	supportsFinishReason: true,
 	maxTokensField: "max_completion_tokens",
 	requiresToolResultName: false,
 	requiresAssistantAfterToolResult: false,
@@ -35,15 +37,24 @@ const compat = {
 	openRouterRouting: {},
 	vercelGatewayRouting: {},
 	chatTemplateKwargs: {},
+	chatTemplateArgs: {},
 	zaiToolStream: false,
+	supportsThinkingTokenBudget: false,
+	thinkingTokenBudgetField: undefined,
 	supportsStrictMode: true,
+	supportsOpenAIGrammarTools: false,
+	supportsMidConvoSystemMessages: false,
+	supportsMidConvoToolAdditions: false,
 	cacheControlFormat: undefined,
 	sendSessionAffinityHeaders: false,
 	sessionAffinityFormat: "openai",
 	supportsLongCacheRetention: true,
-} satisfies Omit<Required<OpenAICompletionsCompat>, "cacheControlFormat" | "deferredToolsMode"> & {
+} satisfies Omit<
+	Required<OpenAICompletionsCompat>,
+	"cacheControlFormat" | "thinkingTokenBudgetField" | "vllmPriority"
+> & {
 	cacheControlFormat?: OpenAICompletionsCompat["cacheControlFormat"];
-	deferredToolsMode?: OpenAICompletionsCompat["deferredToolsMode"];
+	thinkingTokenBudgetField?: OpenAICompletionsCompat["thinkingTokenBudgetField"];
 };
 
 function buildModel(baseUrl = "http://127.0.0.1:1"): Model<"openai-completions"> {
@@ -108,11 +119,13 @@ describe("openai-completions thinking-as-text replay", () => {
 	it("serializes same-model thinking-plus-text replay as assistant text parts", () => {
 		const messages = convertMessages(
 			buildModel(),
-			buildContext(
-				buildAssistant([
-					{ type: "thinking", thinking: "internal reasoning" },
-					{ type: "text", text: "visible answer" },
-				]),
+			normalizeContext(
+				buildContext(
+					buildAssistant([
+						{ type: "thinking", thinking: "internal reasoning" },
+						{ type: "text", text: "visible answer" },
+					]),
+				),
 			),
 			compat,
 		);
@@ -129,7 +142,7 @@ describe("openai-completions thinking-as-text replay", () => {
 	it("serializes same-model thinking-only replay as assistant text parts", () => {
 		const messages = convertMessages(
 			buildModel(),
-			buildContext(buildAssistant([{ type: "thinking", thinking: "internal reasoning" }])),
+			normalizeContext(buildContext(buildAssistant([{ type: "thinking", thinking: "internal reasoning" }]))),
 			compat,
 		);
 
@@ -189,11 +202,13 @@ describe("openai-completions thinking-as-text replay", () => {
 			const events = await collectEvents(
 				streamOpenAICompletions(
 					buildModel(`http://127.0.0.1:${port}`),
-					buildContext(
-						buildAssistant([
-							{ type: "thinking", thinking: "internal reasoning" },
-							{ type: "text", text: "visible answer" },
-						]),
+					normalizeContext(
+						buildContext(
+							buildAssistant([
+								{ type: "thinking", thinking: "internal reasoning" },
+								{ type: "text", text: "visible answer" },
+							]),
+						),
 					),
 					{ apiKey: "test-key" },
 				),

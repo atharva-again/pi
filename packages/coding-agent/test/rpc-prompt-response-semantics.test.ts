@@ -16,7 +16,7 @@ import { AuthStorage } from "../src/core/auth-storage.ts";
 import { SessionManager } from "../src/core/session-manager.ts";
 import { SettingsManager } from "../src/core/settings-manager.ts";
 import { runRpcMode } from "../src/modes/rpc/rpc-mode.ts";
-import { createModelRegistry, getModelRuntime } from "./model-runtime-test-utils.ts";
+import { createInMemoryModelRegistry, getModelRuntime } from "./model-runtime-test-utils.ts";
 import { createTestResourceLoader } from "./utilities.ts";
 
 const rpcIo = vi.hoisted(() => ({
@@ -129,7 +129,7 @@ async function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: 
 	const sessionManager = SessionManager.inMemory();
 	const settingsManager = SettingsManager.create(tempDir, tempDir);
 	const authStorage = AuthStorage.create(join(tempDir, "auth.json"));
-	const modelRegistry = await createModelRegistry(authStorage, tempDir);
+	const modelRegistry = await createInMemoryModelRegistry(authStorage);
 	if (options.withAuth) {
 		await authStorage.modify("anthropic", async () => ({ type: "api_key", key: "test-key" }));
 	}
@@ -156,9 +156,7 @@ async function createRuntimeHost(options: { withAuth: boolean; responseDelayMs: 
 		runtimeHost,
 		cleanup: async () => {
 			try {
-				if (session.isStreaming) {
-					await session.abort();
-				}
+				await session.abort();
 			} catch {
 				// ignore test cleanup failures
 			}
@@ -281,6 +279,60 @@ describe("RPC prompt response semantics", () => {
 			});
 
 			await sleep(150);
+		} finally {
+			await cleanup();
+		}
+	});
+
+	it("returns and clears queued steering and follow-up messages", async () => {
+		const { lineHandler, cleanup } = await startRpcMode({ withAuth: true, responseDelayMs: 500 });
+
+		try {
+			lineHandler(JSON.stringify({ id: "clear-start", type: "prompt", message: "Start" }));
+			await vi.waitFor(() => {
+				expect(getPromptResponses(rpcIo.outputLines, "clear-start")).toHaveLength(1);
+			});
+
+			lineHandler(
+				JSON.stringify({
+					id: "clear-steering",
+					type: "prompt",
+					message: "Change direction",
+					streamingBehavior: "steer",
+				}),
+			);
+			await vi.waitFor(() => {
+				expect(getPromptResponses(rpcIo.outputLines, "clear-steering")).toHaveLength(1);
+			});
+
+			lineHandler(
+				JSON.stringify({
+					id: "clear-follow-up",
+					type: "prompt",
+					message: "Summarize when finished",
+					streamingBehavior: "followUp",
+				}),
+			);
+			await vi.waitFor(() => {
+				expect(getPromptResponses(rpcIo.outputLines, "clear-follow-up")).toHaveLength(1);
+			});
+
+			lineHandler(JSON.stringify({ id: "clear", type: "clear_queue" }));
+			await vi.waitFor(() => {
+				expect(parseOutputLines(rpcIo.outputLines)).toContainEqual({
+					id: "clear",
+					type: "response",
+					command: "clear_queue",
+					success: true,
+					data: {
+						steering: ["Change direction"],
+						followUp: ["Summarize when finished"],
+					},
+				});
+			});
+
+			await sleep(600);
+			expect(parseOutputLines(rpcIo.outputLines).filter((record) => record.type === "agent_start")).toHaveLength(1);
 		} finally {
 			await cleanup();
 		}

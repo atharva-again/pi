@@ -4,11 +4,19 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symli
 import { tmpdir } from "node:os";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { installCodingAgentConsumer, packReleasePackages, smokeTestCodingAgentConsumer } from "./coding-agent-consumer.mjs";
 
 const packages = [
+	{ directory: "packages/chord", name: "@earendil-works/chord" },
+	{ directory: "packages/telemetry", name: "@earendil-works/pi-telemetry" },
 	{ directory: "packages/ai", name: "@earendil-works/pi-ai" },
+	{ directory: "packages/durable", name: "@earendil-works/pi-durable" },
 	{ directory: "packages/tui", name: "@earendil-works/pi-tui" },
 	{ directory: "packages/agent", name: "@earendil-works/pi-agent-core" },
+	{ directory: "packages/protocol", name: "@earendil-works/pi-protocol" },
+	{ directory: "packages/client", name: "@earendil-works/pi-client" },
+	{ directory: "packages/session-backends/sqlite-node", name: "@earendil-works/pi-session-backend-sqlite-node" },
+	{ directory: "packages/server", name: "@earendil-works/pi-server" },
 	{ directory: "packages/coding-agent", name: "@earendil-works/pi-coding-agent" },
 ];
 
@@ -131,11 +139,6 @@ function prepareOutputDirectory(options, repoRoot) {
 	return outDir;
 }
 
-function fileSpecifier(fromDirectory, file) {
-	const relativePath = relative(fromDirectory, file).replaceAll("\\", "/");
-	return `file:${relativePath.startsWith(".") ? relativePath : `./${relativePath}`}`;
-}
-
 function currentBinaryPlatform() {
 	if (process.platform === "win32") return process.arch === "arm64" ? "windows-arm64" : "windows-x64";
 	if (process.platform === "darwin") return process.arch === "arm64" ? "darwin-arm64" : "darwin-x64";
@@ -151,7 +154,6 @@ function buildBunBinaryRelease(targetDirectory, archiveDirectory) {
 	const binaryBuildDirectory = join(archiveDirectory, "binary-build");
 	run("./scripts/build-binaries.sh", [
 		"--skip-install",
-		"--skip-deps",
 		"--skip-build",
 		"--platform",
 		platform,
@@ -180,20 +182,6 @@ function createPiShim(installDirectory) {
 	symlinkSync(join("node_modules", ".bin", "pi"), join(installDirectory, "pi"));
 }
 
-function packPackage(pkg, tarballDirectory) {
-	const packageJson = readPackageJson(pkg.directory);
-	if (packageJson.name !== pkg.name) {
-		throw new Error(`${pkg.directory}/package.json has name ${packageJson.name}, expected ${pkg.name}`);
-	}
-
-	const output = run("npm", ["pack", "--json", "--pack-destination", tarballDirectory], {
-		capture: true,
-		cwd: pkg.directory,
-	});
-	const packed = JSON.parse(output)[0];
-	return join(tarballDirectory, packed.filename);
-}
-
 const options = parseArgs();
 const repoRoot = process.cwd();
 const rootPackageJson = readPackageJson(repoRoot);
@@ -209,49 +197,39 @@ const bunInstallDirectory = join(outDir, "bun-install");
 const binaryDirectory = join(outDir, "bun");
 mkdirSync(tarballDirectory, { recursive: true });
 
+// Release artifacts always use a freshly generated, strictly validated catalog,
+// including when checks or tests are explicitly skipped.
+run("npm", ["run", "generate:models"], { cwd: repoRoot });
+
 if (!options.skipCheck) {
 	run("npm", ["run", "check"], { cwd: repoRoot });
+}
+
+for (const pkg of packages) {
+	run("npm", ["run", "clean"], { cwd: pkg.directory });
+	run("npm", ["run", pkg.directory === "packages/ai" ? "build:offline" : "build"], { cwd: pkg.directory });
 }
 
 if (!options.skipTest) {
 	run("./test.sh", [], { cwd: repoRoot });
 }
 
-for (const pkg of packages) {
-	run("npm", ["run", "clean"], { cwd: pkg.directory });
-	run("npm", ["run", "build"], { cwd: pkg.directory });
-}
-
-const tarballs = new Map();
-for (const pkg of packages) {
-	const tarball = packPackage(pkg, tarballDirectory);
-	tarballs.set(pkg.name, tarball);
-}
+const tarballs = packReleasePackages(packages, tarballDirectory);
 
 let binaryPlatform;
 if (!options.skipInstall) {
 	binaryPlatform = buildBunBinaryRelease(binaryDirectory, outDir);
 
-	mkdirSync(nodeInstallDirectory, { recursive: true });
-	const dependencies = Object.fromEntries(
-		packages.map((pkg) => [pkg.name, fileSpecifier(nodeInstallDirectory, tarballs.get(pkg.name))]),
-	);
-	const installPackageJson = `${JSON.stringify({ private: true, dependencies, overrides: dependencies }, undefined, "\t")}\n`;
-	writeFileSync(join(nodeInstallDirectory, "package.json"), installPackageJson);
-
-	run("npm", ["install", "--omit=dev", "--ignore-scripts"], { cwd: nodeInstallDirectory });
+	installCodingAgentConsumer(nodeInstallDirectory, tarballs);
+	smokeTestCodingAgentConsumer(nodeInstallDirectory);
 	createPiShim(nodeInstallDirectory);
 
 	if (!options.skipBunInstall) {
 		if (!commandExists("bun")) {
 			throw new Error("Bun is required for the isolated Bun install. Use --skip-bun-install to skip it.");
 		}
-		mkdirSync(bunInstallDirectory, { recursive: true });
-		const bunDependencies = Object.fromEntries(
-			packages.map((pkg) => [pkg.name, fileSpecifier(bunInstallDirectory, tarballs.get(pkg.name))]),
-		);
-		writeFileSync(join(bunInstallDirectory, "package.json"), `${JSON.stringify({ private: true, dependencies: bunDependencies, overrides: bunDependencies }, undefined, "\t")}\n`);
-		run("bun", ["install", "--production", "--ignore-scripts"], { cwd: bunInstallDirectory });
+		installCodingAgentConsumer(bunInstallDirectory, tarballs, "bun");
+		smokeTestCodingAgentConsumer(bunInstallDirectory, "bun");
 		createPiShim(bunInstallDirectory);
 	}
 }

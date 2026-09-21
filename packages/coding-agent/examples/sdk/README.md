@@ -71,7 +71,7 @@ const customRuntime = await ModelRuntime.create({
   authPath: "/my/app/auth.json",
   modelsPath: "/my/app/models.json",
 });
-customRuntime.setRuntimeApiKey("anthropic", process.env.MY_KEY!);
+await customRuntime.setRuntimeApiKey("anthropic", process.env.MY_KEY!);
 
 const resourceLoader = new DefaultResourceLoader({
   systemPromptOverride: () => "You are helpful.",
@@ -132,7 +132,7 @@ session.subscribe((event) => {
     case "tool_execution_end":
       console.log(`Result: ${event.result}`);
       break;
-    case "agent_end":
+    case "agent_settled":
       console.log("Done");
       break;
   }

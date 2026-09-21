@@ -2283,6 +2283,8 @@ export class TelegramPiBot {
 				return `[custom: ${entry.customType}]`;
 			case "label":
 				return `[label: ${entry.label ?? "(cleared)"}]`;
+			default:
+				return `[${entry.type}]`;
 		}
 	}
 
