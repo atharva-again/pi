@@ -85,10 +85,11 @@ describe("AgentSession work duration entries", () => {
 		await session.prompt("hello");
 
 		const entries = sessionManager.getEntries();
-		expect(entries.map((entry) => entry.type)).toEqual(["message", "message", "work_duration"]);
-		const duration = entries[2];
+		expect(entries.map((entry) => entry.type)).toEqual(["message", "message", "message", "work_duration"]);
+		const duration = entries.find((entry) => entry.type === "work_duration");
 		expect(duration).toMatchObject({ type: "work_duration", durationMs: 1500 });
 		expect(sessionManager.buildSessionContext().messages.map((message) => message.role)).toEqual([
+			"system",
 			"user",
 			"assistant",
 		]);
@@ -119,6 +120,7 @@ describe("AgentSession work duration entries", () => {
 
 		const entries = sessionManager.getEntries();
 		expect(entries.map((entry) => entry.type)).toEqual([
+			"message",
 			"message",
 			"message",
 			"work_duration",
