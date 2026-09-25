@@ -8,6 +8,7 @@
 
 ### Fixed
 
+- Fixed queued steering and follow-up prompts bypassing standard image normalization.
 - Fixed the `resume-codex` extension to launch standard npm Codex installations on Windows when npm's global bin directory is not on `PATH` ([#18](https://github.com/atharva-again/pi/pull/18) by [@Only-Moon](https://github.com/Only-Moon)).
 
 ## [0.87.0] - 2026-09-21

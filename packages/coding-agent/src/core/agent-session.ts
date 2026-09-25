@@ -1724,11 +1724,7 @@ export class AgentSession {
 						"Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.",
 					);
 				}
-				if (options.streamingBehavior === "followUp") {
-					await this._queueFollowUp(expandedText, currentImages);
-				} else {
-					await this._queueSteer(expandedText, currentImages);
-				}
+				await this._queueNormalizedInput(expandedText, currentImages, options.streamingBehavior);
 				preflightResult?.(true);
 				return;
 			}
@@ -1907,11 +1903,21 @@ export class AgentSession {
 
 		let expandedText = this._expandSkillCommand(processedInput.text);
 		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
+		await this._queueNormalizedInput(expandedText, processedInput.images, behavior);
+	}
 
+	private async _queueNormalizedInput(
+		text: string,
+		images: ImageContent[] | undefined,
+		behavior: "steer" | "followUp",
+	): Promise<void> {
+		const normalized = await this._normalizePromptImages(images);
+		const normalizedText = normalized.hints.length > 0 ? `${text}\n\n${normalized.hints.join("\n")}` : text;
+		const normalizedImages = normalized.images.length > 0 ? normalized.images : undefined;
 		if (behavior === "steer") {
-			await this._queueSteer(expandedText, processedInput.images);
+			await this._queueSteer(normalizedText, normalizedImages);
 		} else {
-			await this._queueFollowUp(expandedText, processedInput.images);
+			await this._queueFollowUp(normalizedText, normalizedImages);
 		}
 	}
 
