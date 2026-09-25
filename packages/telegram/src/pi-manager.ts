@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import type { ImageContent } from "@earendil-works/pi-ai";
 import type {
 	AgentSessionEvent,
 	RpcCommand,
@@ -24,6 +25,13 @@ interface LiveConversation {
 	binding: ConversationBinding;
 	process: RpcProcessInstance;
 }
+
+const TELEGRAM_MEDIA_INSTRUCTIONS = [
+	"This session is connected to Telegram.",
+	"When the user asks you to send a local image or file, include MEDIA:/absolute/path/to/file in your final reply.",
+	"The Telegram adapter uploads each referenced file natively and removes the marker from the visible text.",
+	"Do not claim that a file was sent unless you included its MEDIA: marker.",
+].join(" ");
 
 export interface PiConversationManagerOptions {
 	defaultCwd: string;
@@ -102,6 +110,7 @@ export class PiConversationManager {
 
 	private buildPiArgs(binding: ConversationBinding): string[] {
 		const args: string[] = [];
+		args.push("--append-system-prompt", TELEGRAM_MEDIA_INSTRUCTIONS);
 		if (this.projectTrust) {
 			args.push("--approve");
 		}
@@ -175,9 +184,9 @@ export class PiConversationManager {
 		return this.syncState(live);
 	}
 
-	async prompt(conversation: ConversationRef, message: string): Promise<string | undefined> {
+	async prompt(conversation: ConversationRef, message: string, images?: ImageContent[]): Promise<string | undefined> {
 		const live = await this.getConversation(conversation.chatId, conversation.threadId, conversation.chatType);
-		const response = await live.process.send({ type: "prompt", message, streamingBehavior: "steer" });
+		const response = await live.process.send({ type: "prompt", message, images, streamingBehavior: "steer" });
 		return responseError(response);
 	}
 

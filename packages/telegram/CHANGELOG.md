@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Telegram image input and native media attachment delivery for explicit `MEDIA:` paths, with Telegram-specific delivery instructions for spawned Pi runtimes.
+
+### Changed
+
+- Bounded per-response media delivery, preserved animated GIFs, and made streaming preview cleanup non-blocking.
+
+### Fixed
+
+- Fixed Telegram media marker delimiter and underscore-path handling, plus image MIME type narrowing.
+
 ## [0.1.4] - 2026-07-16
 
 ### Added

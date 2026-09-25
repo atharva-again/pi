@@ -25,6 +25,14 @@ export interface TelegramDocument {
 	file_size?: number;
 }
 
+export interface TelegramPhotoSize {
+	file_id: string;
+	file_unique_id?: string;
+	width: number;
+	height: number;
+	file_size?: number;
+}
+
 export interface TelegramMessage {
 	message_id: number;
 	message_thread_id?: number;
@@ -34,6 +42,7 @@ export interface TelegramMessage {
 	text?: string;
 	caption?: string;
 	document?: TelegramDocument;
+	photo?: TelegramPhotoSize[];
 	reply_to_message?: TelegramMessage;
 }
 
@@ -91,6 +100,26 @@ export interface SendMessageOptions {
 export interface SendDocumentOptions {
 	chatId: string;
 	path: string;
+	threadId?: string;
+	filename?: string;
+	caption?: string;
+	disableNotification?: boolean;
+	replyMarkup?: InlineKeyboardMarkup;
+}
+
+export interface SendPhotoOptions {
+	chatId: string;
+	photo: string | Uint8Array;
+	threadId?: string;
+	filename?: string;
+	caption?: string;
+	disableNotification?: boolean;
+	replyMarkup?: InlineKeyboardMarkup;
+}
+
+export interface SendAnimationOptions {
+	chatId: string;
+	animation: string | Uint8Array;
 	threadId?: string;
 	filename?: string;
 	caption?: string;
@@ -277,6 +306,48 @@ export class TelegramApi {
 		const data = await readFile(options.path);
 		form.append("document", new Blob([new Uint8Array(data)]), options.filename ?? basename(options.path));
 		return this.requestMultipart<SentMessage>("sendDocument", form);
+	}
+
+	async sendPhoto(options: SendPhotoOptions): Promise<SentMessage> {
+		const form = new FormData();
+		form.append("chat_id", String(normalizeChatId(options.chatId)));
+		const threadId = normalizeThreadId(options.threadId);
+		if (threadId !== undefined) {
+			form.append("message_thread_id", String(threadId));
+		}
+		if (options.caption !== undefined) {
+			form.append("caption", options.caption);
+		}
+		if (options.disableNotification !== undefined) {
+			form.append("disable_notification", String(options.disableNotification));
+		}
+		if (options.replyMarkup !== undefined) {
+			form.append("reply_markup", JSON.stringify(options.replyMarkup));
+		}
+		const data = typeof options.photo === "string" ? await readFile(options.photo) : options.photo;
+		form.append("photo", new Blob([new Uint8Array(data)]), options.filename ?? "image.jpg");
+		return this.requestMultipart<SentMessage>("sendPhoto", form);
+	}
+
+	async sendAnimation(options: SendAnimationOptions): Promise<SentMessage> {
+		const form = new FormData();
+		form.append("chat_id", String(normalizeChatId(options.chatId)));
+		const threadId = normalizeThreadId(options.threadId);
+		if (threadId !== undefined) {
+			form.append("message_thread_id", String(threadId));
+		}
+		if (options.caption !== undefined) {
+			form.append("caption", options.caption);
+		}
+		if (options.disableNotification !== undefined) {
+			form.append("disable_notification", String(options.disableNotification));
+		}
+		if (options.replyMarkup !== undefined) {
+			form.append("reply_markup", JSON.stringify(options.replyMarkup));
+		}
+		const data = typeof options.animation === "string" ? await readFile(options.animation) : options.animation;
+		form.append("animation", new Blob([new Uint8Array(data)]), options.filename ?? "animation.gif");
+		return this.requestMultipart<SentMessage>("sendAnimation", form);
 	}
 
 	async editMessageText(options: {

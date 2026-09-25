@@ -1,11 +1,11 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { accessSync, constants, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getSupportedThinkingLevels } from "@earendil-works/pi-ai";
+import { getSupportedThinkingLevels, type ImageContent } from "@earendil-works/pi-ai";
 import type {
 	AgentSessionEvent,
 	RpcCommand,
@@ -16,6 +16,7 @@ import type {
 	SessionStats,
 	SessionTreeNode,
 } from "@earendil-works/pi-coding-agent";
+import { getImageDimensions } from "@earendil-works/pi-tui";
 import type { TelegramBotConfig } from "./config.ts";
 import { type ConversationRef, listRecentSessions, PiConversationManager, resolveSessionPath } from "./pi-manager.ts";
 import { TelegramBindingStore } from "./store.ts";
@@ -28,6 +29,7 @@ import {
 	type TelegramCallbackQuery,
 	type TelegramDocument,
 	type TelegramMessage,
+	type TelegramPhotoSize,
 	type TelegramUpdate,
 	type TelegramUser,
 } from "./telegram-api.ts";
@@ -75,6 +77,7 @@ type DynamicCommandMenu = {
 	skipped: Array<{ name: string; reason: string }>;
 };
 type ResumeScope = "workspace" | "all";
+type TelegramMediaReference = { path: string };
 
 type TreeNodeDisplay = { id: string; label: string; depth: number; entry: SessionTreeNode["entry"] };
 type ToolCallInfo = { name: string; arguments: Record<string, unknown> };
@@ -189,6 +192,89 @@ const RESERVED_TELEGRAM_COMMANDS = new Set([
 const MAX_TELEGRAM_COMMANDS = 100;
 const MAX_TELEGRAM_COMMAND_LENGTH = 32;
 const MAX_TELEGRAM_COMMAND_DESCRIPTION_LENGTH = 256;
+const MAX_TELEGRAM_IMAGE_BYTES = 20 * 1024 * 1024;
+const TELEGRAM_PHOTO_LIMIT_BYTES = 10 * 1024 * 1024;
+const TELEGRAM_DOCUMENT_LIMIT_BYTES = 50 * 1024 * 1024;
+const TELEGRAM_MEDIA_RESPONSE_LIMIT = 5;
+const TELEGRAM_MEDIA_RESPONSE_BYTES = 100 * 1024 * 1024;
+
+const IMAGE_MIME_TYPES: Readonly<Record<string, string>> = {
+	avif: "image/avif",
+	bmp: "image/bmp",
+	gif: "image/gif",
+	jpeg: "image/jpeg",
+	jpg: "image/jpeg",
+	png: "image/png",
+	tif: "image/tiff",
+	tiff: "image/tiff",
+	webp: "image/webp",
+	svg: "image/svg+xml",
+};
+
+const MEDIA_DOCUMENT_EXTENSIONS = new Set([
+	"aac",
+	"apk",
+	"avi",
+	"bz2",
+	"csv",
+	"docx",
+	"epub",
+	"flac",
+	"gz",
+	"html",
+	"json",
+	"log",
+	"m4a",
+	"md",
+	"mkv",
+	"mov",
+	"mp3",
+	"mp4",
+	"ods",
+	"odp",
+	"odt",
+	"pdf",
+	"pptx",
+	"rar",
+	"tar",
+	"txt",
+	"wav",
+	"webm",
+	"xlsx",
+	"xml",
+	"yaml",
+	"yml",
+	"zip",
+	"7z",
+]);
+
+const MEDIA_DENIED_ROOTS = ["/etc", "/proc", "/sys", "/dev", "/root", "/boot", "/var/log", "/var/lib", "/var/run"];
+const MEDIA_DENIED_PATH_COMPONENTS = new Set([
+	".pi",
+	".ssh",
+	".aws",
+	".gnupg",
+	".kube",
+	".docker",
+	".config",
+	".azure",
+	".gcloud",
+	".git",
+]);
+const MEDIA_DENIED_FILENAMES = new Set([
+	".env",
+	"auth.json",
+	"credentials",
+	"config.yaml",
+	"models.json",
+	"settings.json",
+	"google_token.json",
+	"google_oauth_pending.json",
+	"state.db",
+]);
+
+const TELEGRAM_PHOTO_MAX_DIMENSION_SUM = 10_000;
+const TELEGRAM_PHOTO_MAX_ASPECT_RATIO = 20;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
@@ -257,6 +343,177 @@ function pathCommandArgument(args: string): string | undefined {
 
 function redactToken(text: string): string {
 	return text.replace(/\b\d{6,}:[A-Za-z0-9_-]{20,}\b/g, "<telegram-token>");
+}
+
+function imageMimeTypeForPath(path: string): string | undefined {
+	const extension = path.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
+	return extension ? IMAGE_MIME_TYPES[extension] : undefined;
+}
+
+function isSupportedMediaPath(path: string): boolean {
+	const extension = path.match(/\.([a-z0-9]+)$/i)?.[1]?.toLowerCase();
+	return (
+		imageMimeTypeForPath(path) !== undefined || (extension !== undefined && MEDIA_DOCUMENT_EXTENSIONS.has(extension))
+	);
+}
+
+function isImageDocument(document: TelegramDocument | undefined): boolean {
+	if (!document) return false;
+	if (document.mime_type?.startsWith("image/")) return true;
+	return document.file_name !== undefined && imageMimeTypeForPath(document.file_name) !== undefined;
+}
+
+function largestPhoto(photos: TelegramPhotoSize[] | undefined): TelegramPhotoSize | undefined {
+	return photos?.reduce<TelegramPhotoSize | undefined>((largest, photo) => {
+		if (!largest) return photo;
+		const largestArea = largest.width * largest.height;
+		const photoArea = photo.width * photo.height;
+		return photoArea >= largestArea ? photo : largest;
+	}, undefined);
+}
+
+type MediaPathResolution = { path: string } | { error: string };
+
+function systemErrorCode(error: unknown): string | undefined {
+	if (!(error instanceof Error) || !("code" in error)) return undefined;
+	const code = error.code;
+	return typeof code === "string" ? code : undefined;
+}
+
+function mediaFilesystemError(path: string, error: unknown, symlink = false): string {
+	const code = systemErrorCode(error);
+	if (code === "ENOENT" || code === "ENOTDIR") {
+		return symlink ? `Media symlink target was not found: ${path}` : `Media file was not found: ${path}`;
+	}
+	if (code === "EACCES" || code === "EPERM") {
+		return `Permission denied while accessing media file: ${path}`;
+	}
+	if (code === "ELOOP") {
+		return `Media symlink could not be resolved: ${path}`;
+	}
+	return `Could not access media file ${path}: ${formatError(error)}`;
+}
+
+function isDeniedMediaFilename(path: string): boolean {
+	const filename = basename(path).toLowerCase();
+	return (
+		MEDIA_DENIED_FILENAMES.has(filename) ||
+		/^(?:auth|config|configuration|credential|credentials|model|models|oauth|password|passwords|secret|secrets|setting|settings|token|tokens)(?:[._-].*)?$/.test(
+			filename,
+		)
+	);
+}
+
+function resolveLocalMediaPath(value: string): MediaPathResolution {
+	const path = value.startsWith("~/") ? join(homedir(), value.slice(2)) : value;
+	if (!path.startsWith("/")) return { error: `Media path must be absolute: ${path}` };
+	let linkStats: ReturnType<typeof lstatSync>;
+	try {
+		linkStats = lstatSync(path);
+	} catch (error) {
+		return { error: mediaFilesystemError(path, error) };
+	}
+
+	let resolved: string;
+	try {
+		resolved = realpathSync(path);
+	} catch (error) {
+		return { error: mediaFilesystemError(path, error, linkStats.isSymbolicLink()) };
+	}
+
+	const pathComponents = resolved.split("/").filter(Boolean);
+	const isDeniedRoot = MEDIA_DENIED_ROOTS.some((root) => resolved === root || resolved.startsWith(`${root}/`));
+	const hasDeniedComponent = pathComponents.some((component) =>
+		MEDIA_DENIED_PATH_COMPONENTS.has(component.toLowerCase()),
+	);
+	if (isDeniedRoot || hasDeniedComponent || isDeniedMediaFilename(resolved)) {
+		return { error: `Media path is not allowed: ${path}` };
+	}
+
+	try {
+		if (!statSync(resolved).isFile()) {
+			return { error: `Media path is not a regular file: ${path}` };
+		}
+	} catch (error) {
+		return { error: mediaFilesystemError(path, error, linkStats.isSymbolicLink()) };
+	}
+	return { path: resolved };
+}
+
+function extractMediaReferences(text: string): {
+	text: string;
+	media: TelegramMediaReference[];
+	errors: string[];
+} {
+	const media: TelegramMediaReference[] = [];
+	const errors: string[] = [];
+	const seenPaths = new Set<string>();
+	const seenErrors = new Set<string>();
+	const pattern = /(?<!\S)([`"'*]{0,3})MEDIA:\s*(`[^`\n]+`|"[^"\n]+"|'[^'\n]+'|(?:~\/|\/)[^\s`"'<>*]+)([`"'*]{0,3})/g;
+	const cleaned = text.replace(pattern, (match, prefix: string, rawPath: string, suffix: string) => {
+		if (prefix && suffix !== prefix) return match;
+		const candidate = rawPath.replace(/^([`"'])|([`"'])$/g, "").replace(/[),.;!?*]+$/g, "");
+		const resolution = resolveLocalMediaPath(candidate);
+		if ("error" in resolution) {
+			if (!seenErrors.has(resolution.error)) {
+				seenErrors.add(resolution.error);
+				errors.push(resolution.error);
+			}
+			return prefix ? "" : suffix;
+		}
+		if (!isSupportedMediaPath(resolution.path)) {
+			const error = `Media file type is not supported: ${candidate}`;
+			if (!seenErrors.has(error)) {
+				seenErrors.add(error);
+				errors.push(error);
+			}
+			return prefix ? "" : suffix;
+		}
+		if (!seenPaths.has(resolution.path)) {
+			seenPaths.add(resolution.path);
+			media.push({ path: resolution.path });
+		}
+		return prefix ? "" : suffix;
+	});
+	return { text: cleaned, media, errors };
+}
+
+function readableMediaFileSize(path: string): number {
+	let stats: ReturnType<typeof statSync>;
+	try {
+		stats = statSync(path);
+		accessSync(path, constants.R_OK);
+	} catch (error) {
+		throw new Error(mediaFilesystemError(path, error));
+	}
+	if (!stats.isFile()) {
+		throw new Error(`Media path is not a regular file: ${path}`);
+	}
+	return stats.size;
+}
+
+function validateMediaUploadBatch(media: TelegramMediaReference[]): string | undefined {
+	if (media.length > TELEGRAM_MEDIA_RESPONSE_LIMIT) {
+		return `A response may contain at most ${TELEGRAM_MEDIA_RESPONSE_LIMIT} media files`;
+	}
+
+	let totalSize = 0;
+	for (const reference of media) {
+		let size: number;
+		try {
+			size = readableMediaFileSize(reference.path);
+		} catch (error) {
+			return formatError(error);
+		}
+		if (size > TELEGRAM_DOCUMENT_LIMIT_BYTES) {
+			return `Media file is larger than the 50 MB Telegram upload limit: ${reference.path}`;
+		}
+		totalSize += size;
+		if (totalSize > TELEGRAM_MEDIA_RESPONSE_BYTES) {
+			return "Combined media files exceed the 100 MB per-response upload limit";
+		}
+	}
+	return undefined;
 }
 
 function isPrivateChat(message: TelegramMessage): boolean {
@@ -734,12 +991,41 @@ export class TelegramPiBot {
 		await this.handleTelegramAction(this.conversationFromMessage(query.message), action, query.message);
 	}
 
+	private async downloadMessageImages(message: TelegramMessage): Promise<ImageContent[]> {
+		const photo = largestPhoto(message.photo);
+		const document = photo ? undefined : isImageDocument(message.document) ? message.document : undefined;
+		const fileId = photo?.file_id ?? document?.file_id;
+		if (!fileId) return [];
+		const declaredSize = photo?.file_size ?? document?.file_size;
+		if (declaredSize !== undefined && declaredSize > MAX_TELEGRAM_IMAGE_BYTES) {
+			throw new Error("Telegram image is larger than the 20 MB download limit");
+		}
+		const file = await this.api.getFile(fileId);
+		if (!file.file_path) {
+			throw new Error("Telegram did not return a file path for the image");
+		}
+		const data = await this.api.downloadFile(file.file_path);
+		if (data.byteLength > MAX_TELEGRAM_IMAGE_BYTES) {
+			throw new Error("Telegram image is larger than the 20 MB download limit");
+		}
+		return [
+			{
+				type: "image",
+				data: data.toString("base64"),
+				mimeType: photo
+					? "image/jpeg"
+					: (document?.mime_type ?? imageMimeTypeForPath(document?.file_name ?? "") ?? "image/jpeg"),
+			},
+		];
+	}
+
 	private async handleMessage(message: TelegramMessage): Promise<void> {
 		if (!this.isAuthorized(message)) {
 			return;
 		}
 		const text = message.text ?? message.caption ?? "";
-		if (!text.trim() && !message.document) {
+		const hasImage = message.photo !== undefined || isImageDocument(message.document);
+		if (!text.trim() && !message.document && !hasImage) {
 			return;
 		}
 		const conversation = this.conversationFromMessage(message);
@@ -751,7 +1037,7 @@ export class TelegramPiBot {
 			await this.handleCommand(conversation, message, parts.command, parts.args);
 			return;
 		}
-		if (message.document) {
+		if (message.document && !hasImage) {
 			await this.sendText(conversation, "Send /import first, then upload a .jsonl session file.", true);
 			return;
 		}
@@ -766,11 +1052,20 @@ export class TelegramPiBot {
 		if (!this.shouldProcessGroupMessage(message, text, false)) {
 			return;
 		}
-		const prompt = this.cleanBotMention(text);
-		if (!prompt) {
+		let images: ImageContent[] | undefined;
+		if (hasImage) {
+			try {
+				images = await this.downloadMessageImages(message);
+			} catch (error) {
+				await this.sendText(conversation, `Image download failed: ${formatError(error)}`, true);
+				return;
+			}
+		}
+		const prompt = this.cleanBotMention(text) || (images?.length ? "Please analyze the attached image." : "");
+		if (!prompt && !images?.length) {
 			return;
 		}
-		const error = await this.manager.prompt(conversation, prompt);
+		const error = await this.manager.prompt(conversation, prompt, images);
 		if (error) {
 			await this.sendText(conversation, `Error: ${redactToken(error)}`, true);
 			return;
@@ -2548,6 +2843,53 @@ export class TelegramPiBot {
 		return undefined;
 	}
 
+	private async sendMediaReference(conversation: ConversationRef, media: TelegramMediaReference): Promise<void> {
+		const size = readableMediaFileSize(media.path);
+		if (size > TELEGRAM_DOCUMENT_LIMIT_BYTES) {
+			throw new Error("Media file is larger than the 50 MB Telegram upload limit");
+		}
+		const mimeType = imageMimeTypeForPath(media.path);
+		if (mimeType === "image/gif") {
+			await this.api.sendAnimation({
+				chatId: conversation.chatId,
+				threadId: conversation.threadId,
+				animation: media.path,
+				filename: basename(media.path),
+			});
+			return;
+		}
+		let canSendAsPhoto = false;
+		if (mimeType !== undefined && size <= TELEGRAM_PHOTO_LIMIT_BYTES) {
+			try {
+				const dimensions = getImageDimensions(readFileSync(media.path).toString("base64"), mimeType);
+				canSendAsPhoto =
+					dimensions !== null &&
+					dimensions.widthPx > 0 &&
+					dimensions.heightPx > 0 &&
+					dimensions.widthPx + dimensions.heightPx <= TELEGRAM_PHOTO_MAX_DIMENSION_SUM &&
+					Math.max(dimensions.widthPx, dimensions.heightPx) / Math.min(dimensions.widthPx, dimensions.heightPx) <=
+						TELEGRAM_PHOTO_MAX_ASPECT_RATIO;
+			} catch (error) {
+				throw new Error(mediaFilesystemError(media.path, error));
+			}
+		}
+		if (!canSendAsPhoto) {
+			await this.api.sendDocument({
+				chatId: conversation.chatId,
+				threadId: conversation.threadId,
+				path: media.path,
+				filename: basename(media.path),
+			});
+			return;
+		}
+		await this.api.sendPhoto({
+			chatId: conversation.chatId,
+			threadId: conversation.threadId,
+			photo: media.path,
+			filename: basename(media.path),
+		});
+	}
+
 	private async handleAgentEvent(conversation: ConversationRef, event: AgentSessionEvent): Promise<void> {
 		switch (event.type) {
 			case "agent_start":
@@ -2662,7 +3004,10 @@ export class TelegramPiBot {
 		}
 		state.lastPreviewAt = now;
 		state.lastText = text;
-		const preview = truncateTelegramText(text, 3900);
+		const preview = truncateTelegramText(extractMediaReferences(text).text, 3900);
+		if (!preview) {
+			return;
+		}
 		await this.updateEditPreview(conversation, state, preview);
 	}
 
@@ -2691,36 +3036,67 @@ export class TelegramPiBot {
 
 	private async finishAssistantMessage(conversation: ConversationRef, message: AssistantEventMessage): Promise<void> {
 		const state = this.streaming.get(conversation.key);
-		const finalText = this.assistantFinalText(message);
-		if (!finalText) {
+		if (message.stopReason === "toolUse") {
 			return;
 		}
-		const chunks = splitTelegramText(finalText);
+		const rawText = this.assistantFinalText(message) ?? "";
+		const extracted = extractMediaReferences(rawText);
+		const finalText = extracted.text.trim();
+		if (!finalText && extracted.media.length === 0 && extracted.errors.length === 0) {
+			return;
+		}
+		const chunks = finalText ? splitTelegramText(finalText) : [];
 		try {
 			if (state?.previewMessageId !== undefined) {
-				const text = chunks[0] ?? finalText;
-				try {
-					await this.api.editRichMessage({
-						chatId: conversation.chatId,
-						threadId: conversation.threadId,
-						messageId: state.previewMessageId,
-						text,
-					});
-				} catch {
-					await this.api.editMessageText({
-						chatId: conversation.chatId,
-						threadId: conversation.threadId,
-						messageId: state.previewMessageId,
-						text,
-					});
+				if (chunks.length > 0) {
+					const text = chunks[0] ?? finalText;
+					try {
+						await this.api.editRichMessage({
+							chatId: conversation.chatId,
+							threadId: conversation.threadId,
+							messageId: state.previewMessageId,
+							text,
+						});
+					} catch {
+						await this.api.editMessageText({
+							chatId: conversation.chatId,
+							threadId: conversation.threadId,
+							messageId: state.previewMessageId,
+							text,
+						});
+					}
+				} else {
+					try {
+						await this.api.deleteMessage({
+							chatId: conversation.chatId,
+							messageId: state.previewMessageId,
+						});
+					} catch (error) {
+						console.error(`Telegram preview cleanup error: ${redactToken(formatError(error))}`);
+					}
 				}
 				for (const chunk of chunks.slice(1)) {
 					await this.sendText(conversation, chunk, false, undefined, true);
 				}
-				return;
+			} else {
+				for (const chunk of chunks) {
+					await this.sendText(conversation, chunk, false, undefined, true);
+				}
 			}
-			for (const chunk of chunks) {
-				await this.sendText(conversation, chunk, false, undefined, true);
+			const mediaBatchError = validateMediaUploadBatch(extracted.media);
+			if (mediaBatchError) {
+				await this.sendText(conversation, `Media delivery failed: ${redactToken(mediaBatchError)}`, true);
+			} else {
+				for (const media of extracted.media) {
+					try {
+						await this.sendMediaReference(conversation, media);
+					} catch (error) {
+						await this.sendText(conversation, `Media delivery failed: ${redactToken(formatError(error))}`, true);
+					}
+				}
+			}
+			for (const error of extracted.errors) {
+				await this.sendText(conversation, `Media delivery failed: ${redactToken(error)}`, true);
 			}
 		} finally {
 			this.stopTypingIndicator(conversation.key);

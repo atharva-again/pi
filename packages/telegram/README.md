@@ -42,6 +42,7 @@ pi-tg
 - Workspace extension, prompt, and skill commands are added to the per-chat slash menu when a Pi runtime is available.
 - `/scoped_models` is the Telegram-safe alias for Pi's `/scoped-models` command.
 - Menu-like commands use inline buttons, confirmations, document upload/download, and per-chat pending prompts.
+- Telegram photos and image documents can be sent to Pi as image attachments; `MEDIA:` image and supported file paths in assistant replies are sent back as native Telegram attachments.
 - Workspace changes are available from `/settings` and `/session` buttons without adding an extra slash command.
 - Normal messages are sent to pi with full tool access as the user running `pi-tg`.
 
@@ -76,3 +77,5 @@ Pi commands:
 - `/resume` - recent-session picker or `/resume <id-or-path>`
 - `/reload` - reload keybindings, extensions, skills, prompts, and themes
 - `/quit` - private-chat confirmation to stop `pi-tg`
+
+To send an image or supported file generated or saved by the agent back to Telegram, the assistant can include `MEDIA:/absolute/path/to/file` in its final reply. Images are sent as Telegram photos; other supported files are sent as documents.
