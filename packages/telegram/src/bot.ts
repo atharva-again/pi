@@ -911,6 +911,9 @@ export class TelegramPiBot {
 		if (isPrivateChat(message)) {
 			return true;
 		}
+		if (message.chat.is_forum && this.config.allowedChats.has(chatId(message))) {
+			return true;
+		}
 		if (command) {
 			return true;
 		}

@@ -15,6 +15,7 @@ export interface TelegramChat {
 	type: "private" | "group" | "supergroup" | "channel" | string;
 	title?: string;
 	username?: string;
+	is_forum?: boolean;
 }
 
 export interface TelegramDocument {
