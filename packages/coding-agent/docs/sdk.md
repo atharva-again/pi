@@ -361,7 +361,7 @@ const { session } = await createAgentSession({
   - `.agents/skills/` in `cwd` and ancestor directories (up to git repo root, or filesystem root when not in a repo)
 - Project prompts (`.pi/prompts/`)
 - Context files (`AGENTS.md` walking up from cwd)
-- Session directory naming
+- Project association in session metadata
 
 `agentDir` is used by `DefaultResourceLoader` for:
 - Global extensions (`extensions/`)
@@ -373,9 +373,9 @@ const { session } = await createAgentSession({
 - Settings (`settings.json`)
 - Custom models (`models.json`)
 - Credentials (`auth.json`)
-- Sessions (`sessions/`)
+- Sessions (`sessions.db`)
 
-When you pass a custom `ResourceLoader`, `cwd` and `agentDir` no longer control resource discovery. They still influence session naming and tool path resolution.
+When you pass a custom `ResourceLoader`, `cwd` and `agentDir` no longer control resource discovery. They still influence session project metadata and tool path resolution.
 
 ### Model
 
@@ -532,8 +532,8 @@ const { session } = await createAgentSession({ resourceLoader: loader });
 
 Specify which built-in tools to enable:
 
-- Built-in tool names: `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, `ls`
-- Default built-ins: `read`, `bash`, `edit`, `write`
+- Built-in tool names: `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, `ls`, `search_sessions`, `read_session_context`
+- Default built-ins: `read`, `bash`, `edit`, `write`, `search_sessions`, `read_session_context`
 - `noTools: "all"` disables all tools
 - `noTools: "builtin"` disables default built-ins while keeping extension and custom tools enabled
 - `excludeTools` disables specific built-in, extension, or custom tool names after any `tools` allowlist is applied
@@ -790,7 +790,7 @@ const { session: persisted } = await createAgentSession({
 
 // Continue most recent
 const { session: continued, modelFallbackMessage } = await createAgentSession({
-  sessionManager: SessionManager.continueRecent(process.cwd()),
+	sessionManager: await SessionManager.continueRecent(process.cwd()),
 });
 if (modelFallbackMessage) {
   console.log("Note:", modelFallbackMessage);
@@ -1221,6 +1221,7 @@ createCodingTools
 createReadOnlyTools
 createReadTool, createBashTool, createPowerShellTool, createEditTool, createWriteTool
 createGrepTool, createFindTool, createLsTool
+createSearchSessionsTool, createReadSessionContextTool
 
 // Types
 type CreateAgentSessionOptions

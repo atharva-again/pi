@@ -22,7 +22,7 @@ newSession.dispose();
 
 // Continue most recent session (or create new if none)
 const { session: continued, modelFallbackMessage } = await createAgentSession({
-	sessionManager: SessionManager.continueRecent(process.cwd()),
+	sessionManager: await SessionManager.continueRecent(process.cwd()),
 });
 if (modelFallbackMessage) console.log("Note:", modelFallbackMessage);
 console.log("Continued session:", continued.sessionFile);

@@ -45,7 +45,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/resume` | Pick from previous sessions |
 | `/new` | Start a new session |
 | `/name <name>` | Set session display name |
-| `/session` | Show session file, ID, messages, tokens, and cost |
+| `/session` | Show database location, session ID, messages, tokens, and cost |
 | `/tree` | Jump to any point in the session and continue from there |
 | `/trust` | Save project trust decision for future sessions |
 | `/fork` | Create a new session from a previous user message |
@@ -76,23 +76,23 @@ Configure delivery in [Settings](settings.md) with `steeringMode` and `followUpM
 
 ## Sessions
 
-Sessions are saved automatically to `~/.pi/agent/sessions/`, organized by working directory.
+Sessions are saved automatically to one local embedded Turso database at `~/.pi/agent/sessions.db`. Pi does not connect to Turso Cloud; the session picker filters the shared database by working directory.
 
 ```bash
 pi -c                  # Continue most recent session
 pi -r                  # Browse and select a session
 pi --no-session        # Ephemeral mode; do not save
 pi --name "my task"    # Set session display name at startup
-pi --session <path|id> # Use a specific session file or session ID
-pi --fork <path|id>    # Fork a session into a new session file
+pi --session <path|id> # Use a session locator, legacy JSONL path, or session ID
+pi --fork <path|id>    # Fork a session into a new database session
 ```
 
 Useful session commands:
 
-- `/session` shows the current session file and ID.
-- `/tree` navigates the in-file session tree and can summarize abandoned branches.
+- `/session` shows the current database and session ID.
+- `/tree` navigates the session tree and can summarize abandoned branches.
 - `/fork` creates a new session from an earlier user message.
-- `/clone` duplicates the current active branch into a new session file.
+- `/clone` duplicates the current active branch into a new database session.
 - `/compact` summarizes older messages to free context.
 
 See [Sessions](sessions.md) and [Compaction](compaction.md) for details.
@@ -200,9 +200,9 @@ cat README.md | pi -p "Summarize this text"
 |--------|-------------|
 | `-c`, `--continue` | Continue the most recent session |
 | `-r`, `--resume` | Browse and select a session |
-| `--session <path\|id>` | Use a specific session file or partial UUID |
-| `--fork <path\|id>` | Fork a session file or partial UUID into a new session |
-| `--session-dir <dir>` | Custom session storage directory |
+| `--session <path\|id>` | Use a session locator, legacy JSONL path, or partial ID |
+| `--fork <path\|id>` | Fork a session locator, legacy JSONL file, or partial ID |
+| `--session-dir <dir>` | Custom directory for the local session database |
 | `--no-session` | Ephemeral mode; do not save |
 | `--name <name>`, `-n <name>` | Set session display name at startup |
 

@@ -62,6 +62,14 @@ export {
 	type ReadToolOptions,
 } from "./read.ts";
 export {
+	createReadSessionContextTool,
+	createReadSessionContextToolDefinition,
+	createSearchSessionsTool,
+	createSearchSessionsToolDefinition,
+	type ReadSessionContextInput,
+	type SearchSessionsInput,
+} from "./session-search.ts";
+export {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
 	formatSize,
@@ -88,11 +96,27 @@ import { createGrepTool, createGrepToolDefinition, type GrepToolOptions } from "
 import { createLsTool, createLsToolDefinition, type LsToolOptions } from "./ls.ts";
 import { createPowerShellTool, createPowerShellToolDefinition, type PowerShellToolOptions } from "./powershell.ts";
 import { createReadTool, createReadToolDefinition, type ReadToolOptions } from "./read.ts";
+import {
+	createReadSessionContextTool,
+	createReadSessionContextToolDefinition,
+	createSearchSessionsTool,
+	createSearchSessionsToolDefinition,
+} from "./session-search.ts";
 import { createWriteTool, createWriteToolDefinition, type WriteToolOptions } from "./write.ts";
 
 export type Tool = AgentTool<any>;
 export type ToolDef = ToolDefinition<any, any>;
-export type ToolName = "read" | "bash" | "powershell" | "edit" | "write" | "grep" | "find" | "ls";
+export type ToolName =
+	| "read"
+	| "bash"
+	| "powershell"
+	| "edit"
+	| "write"
+	| "grep"
+	| "find"
+	| "ls"
+	| "search_sessions"
+	| "read_session_context";
 export const allToolNames: Set<ToolName> = new Set([
 	"read",
 	"bash",
@@ -102,6 +126,8 @@ export const allToolNames: Set<ToolName> = new Set([
 	"grep",
 	"find",
 	"ls",
+	"search_sessions",
+	"read_session_context",
 ]);
 
 export interface ToolsOptions {
@@ -133,6 +159,10 @@ export function createToolDefinition(toolName: ToolName, cwd: string, options?: 
 			return createFindToolDefinition(cwd, options?.find);
 		case "ls":
 			return createLsToolDefinition(cwd, options?.ls);
+		case "search_sessions":
+			return createSearchSessionsToolDefinition(cwd);
+		case "read_session_context":
+			return createReadSessionContextToolDefinition(cwd);
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -156,6 +186,10 @@ export function createTool(toolName: ToolName, cwd: string, options?: ToolsOptio
 			return createFindTool(cwd, options?.find);
 		case "ls":
 			return createLsTool(cwd, options?.ls);
+		case "search_sessions":
+			return createSearchSessionsTool(cwd);
+		case "read_session_context":
+			return createReadSessionContextTool(cwd);
 		default:
 			throw new Error(`Unknown tool name: ${toolName}`);
 	}
@@ -176,6 +210,8 @@ export function createReadOnlyToolDefinitions(cwd: string, options?: ToolsOption
 		createGrepToolDefinition(cwd, options?.grep),
 		createFindToolDefinition(cwd, options?.find),
 		createLsToolDefinition(cwd, options?.ls),
+		createSearchSessionsToolDefinition(cwd),
+		createReadSessionContextToolDefinition(cwd),
 	];
 }
 
@@ -189,6 +225,8 @@ export function createAllToolDefinitions(cwd: string, options?: ToolsOptions): R
 		grep: createGrepToolDefinition(cwd, options?.grep),
 		find: createFindToolDefinition(cwd, options?.find),
 		ls: createLsToolDefinition(cwd, options?.ls),
+		search_sessions: createSearchSessionsToolDefinition(cwd),
+		read_session_context: createReadSessionContextToolDefinition(cwd),
 	};
 }
 
@@ -207,6 +245,8 @@ export function createReadOnlyTools(cwd: string, options?: ToolsOptions): Tool[]
 		createGrepTool(cwd, options?.grep),
 		createFindTool(cwd, options?.find),
 		createLsTool(cwd, options?.ls),
+		createSearchSessionsTool(cwd),
+		createReadSessionContextTool(cwd),
 	];
 }
 
@@ -220,5 +260,7 @@ export function createAllTools(cwd: string, options?: ToolsOptions): Record<Tool
 		grep: createGrepTool(cwd, options?.grep),
 		find: createFindTool(cwd, options?.find),
 		ls: createLsTool(cwd, options?.ls),
+		search_sessions: createSearchSessionsTool(cwd),
+		read_session_context: createReadSessionContextTool(cwd),
 	};
 }

@@ -1,5 +1,4 @@
-import { constants, copyFileSync, existsSync, mkdirSync } from "node:fs";
-import { basename, join, parse, resolve } from "node:path";
+import { existsSync } from "node:fs";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
@@ -207,7 +206,11 @@ export class AgentSessionRuntime {
 		}
 
 		const previousSessionFile = this.session.sessionFile;
-		const sessionManager = SessionManager.open(sessionPath, undefined, options?.cwdOverride);
+		const sessionManager = SessionManager.open(
+			sessionPath,
+			this.session.sessionManager.getSessionDir(),
+			options?.cwdOverride,
+		);
 		assertSessionCwdExists(sessionManager, this.cwd);
 		await this.teardownCurrent("resume", sessionManager.getSessionFile());
 		this.apply(
@@ -290,7 +293,7 @@ export class AgentSessionRuntime {
 		if (this.session.sessionManager.isPersisted()) {
 			const currentSessionFile = this.session.sessionFile;
 			if (!currentSessionFile) {
-				throw new Error("Persisted session is missing a session file");
+				throw new Error("Persisted session is missing its locator");
 			}
 			const sessionDir = this.session.sessionManager.getSessionDir();
 			if (!targetLeafId) {
@@ -309,7 +312,7 @@ export class AgentSessionRuntime {
 				return { cancelled: false, selectedText };
 			}
 
-			if (!existsSync(currentSessionFile)) {
+			if (!this.session.sessionManager.hasStoredSession()) {
 				throw new Error(
 					"This session has not been saved yet. Wait for the first assistant response before cloning or forking it.",
 				);
@@ -365,30 +368,13 @@ export class AgentSessionRuntime {
 		}
 
 		const sessionDir = this.session.sessionManager.getSessionDir();
-		if (!existsSync(sessionDir)) {
-			mkdirSync(sessionDir, { recursive: true });
-		}
-
-		let destinationPath = join(sessionDir, basename(resolvedPath));
-		const sourceAlreadyStored = resolve(destinationPath) === resolvedPath;
-		if (!sourceAlreadyStored) {
-			const { name, ext } = parse(destinationPath);
-			let suffix = 1;
-			while (existsSync(destinationPath)) {
-				destinationPath = join(sessionDir, `${name}-${suffix++}${ext}`);
-			}
-		}
-		const beforeResult = await this.emitBeforeSwitch("resume", destinationPath);
+		const beforeResult = await this.emitBeforeSwitch("resume", resolvedPath);
 		if (beforeResult.cancelled) {
 			return beforeResult;
 		}
 
 		const previousSessionFile = this.session.sessionFile;
-		if (!sourceAlreadyStored) {
-			copyFileSync(resolvedPath, destinationPath, constants.COPYFILE_EXCL);
-		}
-
-		const sessionManager = SessionManager.open(destinationPath, sessionDir, cwdOverride);
+		const sessionManager = SessionManager.open(resolvedPath, sessionDir, cwdOverride);
 		assertSessionCwdExists(sessionManager, this.cwd);
 		await this.teardownCurrent("resume", sessionManager.getSessionFile());
 		this.apply(

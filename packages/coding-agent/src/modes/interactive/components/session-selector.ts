@@ -1,6 +1,3 @@
-import { spawnSync } from "node:child_process";
-import { existsSync } from "node:fs";
-import { unlink } from "node:fs/promises";
 import * as os from "node:os";
 import {
 	type Component,
@@ -14,7 +11,7 @@ import {
 	visibleWidth,
 } from "@earendil-works/pi-tui";
 import { KeybindingsManager } from "../../../core/keybindings.ts";
-import type { SessionInfo, SessionListProgress } from "../../../core/session-manager.ts";
+import { type SessionInfo, type SessionListProgress, SessionManager } from "../../../core/session-manager.ts";
 import { SessionPinStore } from "../../../core/session-pin-store.ts";
 import { canonicalizePath as _canonicalizePath } from "../../../utils/paths.ts";
 import { theme } from "../theme/theme.ts";
@@ -66,7 +63,7 @@ class SessionSelectorHeader implements Component {
 	private nameFilter: NameFilter;
 	private requestRender: () => void;
 	private loading = false;
-	private loadProgress: { loaded: number; total: number } | null = null;
+	private loadProgress: { loaded: number; total: number; stage: "reading" | "writing" | "listing" } | null = null;
 	private confirmingDeletePath: string | null = null;
 	private statusMessage: { type: "info" | "error"; message: string } | null = null;
 	private statusTimeout: ReturnType<typeof setTimeout> | null = null;
@@ -97,8 +94,8 @@ class SessionSelectorHeader implements Component {
 		this.loadProgress = null;
 	}
 
-	setProgress(loaded: number, total: number): void {
-		this.loadProgress = { loaded, total };
+	setProgress(loaded: number, total: number, stage: "reading" | "writing" | "listing"): void {
+		this.loadProgress = { loaded, total, stage };
 	}
 
 	setShowRenameHint(show: boolean): void {
@@ -141,8 +138,16 @@ class SessionSelectorHeader implements Component {
 
 		let scopeText: string;
 		if (this.loading) {
-			const progressText = this.loadProgress ? `${this.loadProgress.loaded}/${this.loadProgress.total}` : "...";
-			scopeText = `${theme.fg("muted", "○ Current Folder | ")}${theme.fg("accent", `Loading ${progressText}`)}`;
+			const progressText = this.loadProgress
+				? this.loadProgress.stage === "reading"
+					? `Reading legacy sessions ${Math.round(
+							(100 * this.loadProgress.loaded) / Math.max(this.loadProgress.total, 1),
+						)}%`
+					: this.loadProgress.stage === "writing"
+						? `Importing session entries ${this.loadProgress.loaded}/${this.loadProgress.total}`
+						: `Loading ${this.loadProgress.loaded}/${this.loadProgress.total}`
+				: "Loading ...";
+			scopeText = `${theme.fg("muted", "○ Current Folder | ")}${theme.fg("accent", progressText)}`;
 		} else if (this.scope === "current") {
 			scopeText = `${theme.fg("accent", "◉ Current Folder")}${theme.fg("muted", " | ○ All")}`;
 		} else {
@@ -678,43 +683,12 @@ class SessionList implements Component, Focusable {
 
 type SessionsLoader = (onProgress?: SessionListProgress, signal?: AbortSignal) => Promise<SessionInfo[]>;
 
-/**
- * Delete a session file, trying the `trash` CLI first, then falling back to unlink
- */
-async function deleteSessionFile(
-	sessionPath: string,
-): Promise<{ ok: boolean; method: "trash" | "unlink"; error?: string }> {
-	// Try `trash` first (if installed)
-	const trashArgs = sessionPath.startsWith("-") ? ["--", sessionPath] : [sessionPath];
-	const trashResult = spawnSync("trash", trashArgs, { encoding: "utf-8" });
-
-	const getTrashErrorHint = (): string | null => {
-		const parts: string[] = [];
-		if (trashResult.error) {
-			parts.push(trashResult.error.message);
-		}
-		const stderr = trashResult.stderr?.trim();
-		if (stderr) {
-			parts.push(stderr.split("\n")[0] ?? stderr);
-		}
-		if (parts.length === 0) return null;
-		return `trash: ${parts.join(" · ").slice(0, 200)}`;
-	};
-
-	// If trash reports success, or the file is gone afterwards, treat it as successful
-	if (trashResult.status === 0 || !existsSync(sessionPath)) {
-		return { ok: true, method: "trash" };
-	}
-
-	// Fallback to permanent deletion
+function deleteStoredSession(sessionPath: string): { ok: boolean; error?: string } {
 	try {
-		await unlink(sessionPath);
-		return { ok: true, method: "unlink" };
-	} catch (err) {
-		const unlinkError = err instanceof Error ? err.message : String(err);
-		const trashErrorHint = getTrashErrorHint();
-		const error = trashErrorHint ? `${unlinkError} (${trashErrorHint})` : unlinkError;
-		return { ok: false, method: "unlink", error };
+		if (!SessionManager.delete(sessionPath)) return { ok: false, error: "Session no longer exists" };
+		return { ok: true };
+	} catch (error) {
+		return { ok: false, error: error instanceof Error ? error.message : String(error) };
 	}
 }
 
@@ -877,7 +851,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 				sessions?.find((session) => session.path === sessionPath)?.pinPath ??
 				canonicalizePath(sessionPath) ??
 				sessionPath;
-			const result = await deleteSessionFile(sessionPath);
+			const result = deleteStoredSession(sessionPath);
 
 			if (result.ok) {
 				let pinCleanupError: string | undefined;
@@ -904,8 +878,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 						3000,
 					);
 				} else {
-					const msg = result.method === "trash" ? "Session moved to trash" : "Session deleted";
-					this.header.setStatusMessage({ type: "info", message: msg }, 2000);
+					this.header.setStatusMessage({ type: "info", message: "Session moved to trash" }, 2000);
 				}
 				await this.refreshSessionsAfterMutation();
 			} else {
@@ -1024,7 +997,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 		this.requestRender();
 
 		const isActive = () => (scope === "current" ? this.currentLoad : this.allLoad) === controller;
-		const onProgress: SessionListProgress = (loaded, total, partialSessions) => {
+		const onProgress: SessionListProgress = (loaded, total, partialSessions, stage) => {
 			if (!isActive()) return;
 			if (partialSessions) {
 				const sessions = [...partialSessions];
@@ -1036,7 +1009,7 @@ export class SessionSelectorComponent extends Container implements Focusable {
 				if (scope === this.scope) this.sessionList.setSessions(sessions, showCwd);
 			}
 			if (scope !== this.scope) return;
-			this.header.setProgress(loaded, total);
+			this.header.setProgress(loaded, total, stage ?? "listing");
 			this.requestRender();
 		};
 
@@ -1048,7 +1021,18 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			const pinnedPaths = this.pinStore.getPinnedSessionPaths();
 			const sessions: SessionSelectorSession[] = loadedSessions.map((session) => {
 				const pinPath = canonicalizePath(session.path) ?? session.path;
-				return { ...session, pinPath, pinned: pinnedPaths.has(pinPath) };
+				const legacyPinPath = session.legacyPath ? canonicalizePath(session.legacyPath) : undefined;
+				if (legacyPinPath && pinnedPaths.has(legacyPinPath)) {
+					this.pinStore.migratePinnedPath(legacyPinPath, pinPath);
+					pinnedPaths.delete(legacyPinPath);
+					pinnedPaths.add(pinPath);
+				}
+				const legacyPinStillExists = legacyPinPath !== undefined && pinnedPaths.has(legacyPinPath);
+				return {
+					...session,
+					pinPath: legacyPinStillExists ? legacyPinPath : pinPath,
+					pinned: pinnedPaths.has(pinPath) || legacyPinStillExists,
+				};
 			});
 
 			if (scope === "current") {

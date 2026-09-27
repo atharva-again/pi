@@ -16,17 +16,16 @@ import {
 	appendFileSync,
 	closeSync,
 	createReadStream,
+	type Dirent,
 	existsSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
 	readSync,
-	type Stats,
+	realpathSync,
 	statSync,
-	writeFileSync,
 } from "fs";
-import { readdir, stat } from "fs/promises";
-import { basename, join, resolve } from "path";
+import { dirname, join } from "path";
 import { createInterface } from "readline";
 import { StringDecoder } from "string_decoder";
 import { APP_NAME, getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.ts";
@@ -38,6 +37,15 @@ import {
 	createCompactionSummaryMessage,
 	createCustomMessage,
 } from "./messages.ts";
+import {
+	type SessionDatabase,
+	withExistingSessionDatabase,
+	withSessionDatabase,
+	withSessionDatabaseAsync,
+} from "./session-database.ts";
+import { createSessionLocator, parseSessionLocator } from "./session-locator.ts";
+
+export { getSessionDatabasePathFromLocator, isSessionLocatorPath } from "./session-locator.ts";
 export const CURRENT_SESSION_VERSION = 3;
 
 export interface SessionHeader {
@@ -46,6 +54,7 @@ export interface SessionHeader {
 	id: string;
 	timestamp: string;
 	cwd: string;
+	/** Legacy source path or opaque locator of the session this was forked from. */
 	parentSession?: string;
 }
 
@@ -202,7 +211,7 @@ export type SessionEntry =
 	| SessionInfoEntry
 	| WorkDurationEntry;
 
-/** Raw file entry (includes header) */
+/** Stored entry including the session header. */
 export type FileEntry = SessionHeader | SessionEntry;
 
 /** Tree node for getTree() - defensive copy of session structure */
@@ -236,13 +245,16 @@ export interface SessionContext {
 }
 
 export interface SessionInfo {
+	/** Opaque session locator accepted by SessionManager.open(). */
 	path: string;
 	id: string;
 	/** Working directory where the session was started. Empty string for old sessions. */
 	cwd: string;
 	/** User-defined display name from session_info entries. */
 	name?: string;
-	/** Path to the parent session (if this session was forked). */
+	/** Source JSONL path for a session imported from an archive. */
+	legacyPath?: string;
+	/** Parent session locator or legacy JSONL path (if this session was forked). */
 	parentSessionPath?: string;
 	created: Date;
 	modified: Date;
@@ -268,6 +280,7 @@ export type ReadonlySessionManager = Pick<
 	| "getEntries"
 	| "getTree"
 	| "getSessionName"
+	| "ensureSessionDatabaseInitialized"
 >;
 
 function createSessionId(): string {
@@ -304,6 +317,7 @@ function migrateV1ToV2(entries: FileEntry[]): void {
 		}
 
 		entry.id = generateId(ids);
+		ids.add(entry.id);
 		entry.parentId = prevId;
 		prevId = entry.id;
 
@@ -353,6 +367,67 @@ function migrateToCurrentVersion(entries: FileEntry[]): boolean {
 	if (version < 3) migrateV2ToV3(entries);
 
 	return true;
+}
+
+async function* prepareLegacyEntriesAsync(
+	filePath: string,
+	version: number,
+	sourceHeaderJson: string,
+	signal?: AbortSignal,
+): AsyncGenerator<SessionEntry> {
+	const ids = new Set<string>();
+	const idsBySourceIndex = new Map<number, string>();
+	let previousId: string | null = null;
+	let sourceIndex = 0;
+	let foundHeader = false;
+	let processed = 0;
+
+	for await (const entry of iterateEntriesFromFileAsync(filePath, signal)) {
+		signal?.throwIfAborted();
+		if (entry.type === "session") {
+			if (!foundHeader) {
+				foundHeader = true;
+				if (JSON.stringify(entry) !== sourceHeaderJson) {
+					throw new Error("Legacy session header changed while importing");
+				}
+			}
+			sourceIndex++;
+			continue;
+		}
+
+		const entrySourceIndex = sourceIndex++;
+		if (version < 2) {
+			entry.id = generateId(ids);
+			ids.add(entry.id);
+			entry.parentId = previousId;
+			previousId = entry.id;
+			if (entry.type === "compaction") {
+				const compaction = entry as CompactionEntry & { firstKeptEntryIndex?: number };
+				if (typeof compaction.firstKeptEntryIndex === "number") {
+					const targetId =
+						compaction.firstKeptEntryIndex === entrySourceIndex
+							? entry.id
+							: idsBySourceIndex.get(compaction.firstKeptEntryIndex);
+					if (targetId !== undefined) compaction.firstKeptEntryId = targetId;
+					delete compaction.firstKeptEntryIndex;
+				}
+			}
+			idsBySourceIndex.set(entrySourceIndex, entry.id);
+		}
+		if (version < 3 && entry.type === "message") {
+			const messageEntry = entry as SessionMessageEntry;
+			if (messageEntry.message && (messageEntry.message as { role: string }).role === "hookMessage") {
+				(messageEntry.message as { role: string }).role = "custom";
+			}
+		}
+		yield entry;
+		processed++;
+		if (processed % 100 === 0) {
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			signal?.throwIfAborted();
+		}
+	}
+	if (!foundHeader) throw new Error("Legacy session header disappeared while importing");
 }
 
 /** Exported for testing */
@@ -622,18 +697,22 @@ class SessionHeaderScanLimitError extends Error {
 	}
 }
 
-function parseSessionEntryLine(line: string): FileEntry | null {
-	if (!line.trim()) return null;
-	try {
-		return JSON.parse(line) as FileEntry;
-	} catch {
-		// Skip malformed lines
-		return null;
+function parseSessionEntryLine(line: string): FileEntry | undefined {
+	if (!line.trim()) return undefined;
+	const parsed: unknown = JSON.parse(line);
+	if (
+		typeof parsed !== "object" ||
+		parsed === null ||
+		Array.isArray(parsed) ||
+		typeof (parsed as { type?: unknown }).type !== "string"
+	) {
+		throw new Error("Invalid session JSONL entry: expected an object with a string type");
 	}
+	return parsed as FileEntry;
 }
 
 /** Exported for testing */
-export function loadEntriesFromFile(filePath: string): FileEntry[] {
+export function loadEntriesFromFile(filePath: string, repairTrailingNewline = true): FileEntry[] {
 	const resolvedFilePath = normalizePath(filePath);
 	if (!existsSync(resolvedFilePath)) return [];
 
@@ -674,13 +753,182 @@ export function loadEntriesFromFile(filePath: string): FileEntry[] {
 		return [];
 	}
 
-	if (pending) appendFileSync(resolvedFilePath, "\n");
+	if (pending && repairTrailingNewline) appendFileSync(resolvedFilePath, "\n");
 	return entries;
+}
+
+const LEGACY_JSONL_IMPORT_KEY = "legacy-jsonl-import-v3";
+const DEFAULT_SESSION_DATABASE_FILENAME = "sessions.db";
+
+function getSessionDatabasePath(sessionDir?: string): string {
+	return sessionDir
+		? join(normalizePath(sessionDir), DEFAULT_SESSION_DATABASE_FILENAME)
+		: join(getDefaultAgentDir(), DEFAULT_SESSION_DATABASE_FILENAME);
+}
+function collectLegacySessionFiles(directory: string, depth: number): string[] {
+	const files: string[] = [];
+	let entries: Dirent[];
+	try {
+		entries = readdirSync(directory, { withFileTypes: true });
+	} catch (error) {
+		if (error instanceof Error && "code" in error && error.code === "ENOENT") return files;
+		throw new Error(`Failed to discover legacy sessions in ${directory}`, { cause: error });
+	}
+
+	for (const entry of entries) {
+		const path = join(directory, entry.name);
+		let isFile = entry.isFile();
+		let isDirectory = entry.isDirectory();
+		if (entry.isSymbolicLink()) {
+			try {
+				const target = statSync(path);
+				isFile = target.isFile();
+				isDirectory = target.isDirectory();
+			} catch (error) {
+				if (error instanceof Error && "code" in error && error.code === "ENOENT") continue;
+				throw new Error(`Failed to inspect legacy session symlink ${path}`, { cause: error });
+			}
+		}
+		if (isFile && entry.name.endsWith(".jsonl")) {
+			files.push(path);
+		} else if (depth > 0 && isDirectory) {
+			files.push(...collectLegacySessionFiles(path, depth - 1));
+		}
+	}
+	return files;
+}
+
+async function* iterateEntriesFromFileAsync(
+	filePath: string,
+	signal: AbortSignal | undefined,
+	onReadProgress: (bytesRead: number) => void = () => {},
+): AsyncGenerator<FileEntry> {
+	const input = createReadStream(normalizePath(filePath), { encoding: "utf8", signal });
+	const lines = createInterface({ input, crlfDelay: Infinity });
+	let linesSinceYield = 0;
+	try {
+		for await (const line of lines) {
+			signal?.throwIfAborted();
+			const entry = parseSessionEntryLine(line);
+			if (entry) yield entry;
+			linesSinceYield++;
+			if (linesSinceYield >= 100) {
+				linesSinceYield = 0;
+				onReadProgress(input.bytesRead);
+				await new Promise<void>((resolve) => setImmediate(resolve));
+				signal?.throwIfAborted();
+			}
+		}
+		signal?.throwIfAborted();
+		onReadProgress(input.bytesRead);
+	} finally {
+		lines.close();
+		input.destroy();
+	}
+}
+
+async function loadEntriesFromFileAsync(
+	filePath: string,
+	signal: AbortSignal | undefined,
+	onReadProgress: (bytesRead: number) => void,
+): Promise<FileEntry[]> {
+	const entries: FileEntry[] = [];
+	for await (const entry of iterateEntriesFromFileAsync(filePath, signal, onReadProgress)) entries.push(entry);
+	return entries;
+}
+
+async function scanLegacyArchiveAsync(
+	filePath: string,
+	signal: AbortSignal | undefined,
+	onReadProgress: (bytesRead: number) => void,
+): Promise<{ header?: SessionHeader; totalEntries: number }> {
+	let header: SessionHeader | undefined;
+	let totalEntries = 0;
+	for await (const entry of iterateEntriesFromFileAsync(filePath, signal, onReadProgress)) {
+		if (entry.type === "session") {
+			header ??= entry as SessionHeader;
+		} else {
+			totalEntries++;
+		}
+	}
+	return { header, totalEntries };
+}
+
+async function initializeSessionDatabase(
+	databasePath: string,
+	sessionDir: string,
+	onProgress?: SessionListProgress,
+	signal?: AbortSignal,
+): Promise<void> {
+	signal?.throwIfAborted();
+	const resolvedDatabasePath = resolvePath(databasePath);
+	const isComplete = withSessionDatabase(
+		resolvedDatabasePath,
+		(database) => database.getMetadata(LEGACY_JSONL_IMPORT_KEY) === "complete",
+	);
+	if (isComplete) return;
+
+	const files = collectLegacySessionFilesForDatabase(resolvedDatabasePath, sessionDir).map((path) => ({
+		path,
+		size: statSync(path).size,
+	}));
+	const totalBytes = files.reduce((total, file) => total + file.size, 0);
+	let completedBytes = 0;
+	for (const { path, size } of files) {
+		signal?.throwIfAborted();
+		try {
+			const { header, totalEntries } = await scanLegacyArchiveAsync(path, signal, (bytesRead) => {
+				onProgress?.(completedBytes + Math.min(bytesRead, size), totalBytes, undefined, "reading");
+			});
+			await new Promise<void>((resolve) => setImmediate(resolve));
+			signal?.throwIfAborted();
+			if (header) {
+				const version = header.version ?? 1;
+				const sourceHeaderJson = JSON.stringify(header);
+				if (version < CURRENT_SESSION_VERSION) header.version = CURRENT_SESSION_VERSION;
+				await withSessionDatabaseAsync(resolvedDatabasePath, (database) =>
+					database.importSessionAsync(
+						header,
+						prepareLegacyEntriesAsync(path, version, sourceHeaderJson, signal),
+						totalEntries,
+						path,
+						signal,
+						(loaded, total) => onProgress?.(loaded, total, undefined, "writing"),
+					),
+				);
+			}
+		} catch (error) {
+			// Cancellation is user control flow; preserve AbortError rather than wrapping it as an import failure.
+			if (signal?.aborted) signal.throwIfAborted();
+			throw new Error(`Failed to import legacy session archive ${path}`, { cause: error });
+		}
+		completedBytes += size;
+		onProgress?.(completedBytes, totalBytes, undefined, "reading");
+	}
+	signal?.throwIfAborted();
+	withSessionDatabase(resolvedDatabasePath, (database) => database.setMetadata(LEGACY_JSONL_IMPORT_KEY, "complete"));
+}
+
+function getStoredSession(databasePath: string, sessionId: string, cwd?: string): FileEntry[] | undefined {
+	return withExistingSessionDatabase(
+		databasePath,
+		(database) => database.readSession(sessionId, cwd) as FileEntry[] | undefined,
+	);
+}
+
+/** Check whether an opaque session locator refers to an active stored session. */
+export function hasStoredSessionLocator(value: string): boolean {
+	const locator = parseSessionLocator(value);
+	return locator
+		? withExistingSessionDatabase(locator.databasePath, (database) =>
+				database.hasSession(locator.sessionId, locator.cwd),
+			)
+		: false;
 }
 
 /**
  * Inspect a physical line while searching for the first parsed session entry.
- * Blank and malformed lines are skipped to match loadEntriesFromFile().
+ * Blank lines are skipped; malformed JSON propagates as a parse error.
  * Returns undefined to keep scanning, null for a parsed non-header entry, or the header.
  */
 function parseSessionHeaderCandidate(line: string): SessionHeader | null | undefined {
@@ -735,14 +983,39 @@ function readSessionHeader(filePath: string): SessionHeader | null {
 	}
 }
 
-function readSessionHeaderForDiscovery(filePath: string): SessionHeader | null {
-	try {
-		return readSessionHeader(filePath);
-	} catch {
-		// Discovery is best-effort: unreadable or oversized files are not sessions,
-		// and one corrupt file must not prevent other sessions from being found.
-		return null;
+function collectLegacySessionFilesForDatabase(databasePath: string, sessionDir: string): string[] {
+	const isDefaultDatabase = resolvePath(databasePath) === resolvePath(getSessionDatabasePath());
+	const files = isDefaultDatabase
+		? [...collectLegacySessionFiles(getDefaultAgentDir(), 0), ...collectLegacySessionFiles(getSessionsDir(), 1)]
+		: [...collectLegacySessionFiles(sessionDir, 0), ...collectLegacySessionFiles(join(sessionDir, "sessions"), 1)];
+	const seenArchives = new Set<string>();
+	return files.filter((file) => {
+		const canonicalPath = realpathSync(file);
+		if (seenArchives.has(canonicalPath)) return false;
+		seenArchives.add(canonicalPath);
+		return true;
+	});
+}
+
+function findLegacySessionIdConflict(
+	databasePath: string,
+	sessionDir: string,
+	cwd: string,
+	sessionId: string,
+): string | undefined {
+	const resolvedCwd = resolvePath(cwd);
+	for (const path of collectLegacySessionFilesForDatabase(databasePath, sessionDir)) {
+		const header = readSessionHeader(path);
+		if (
+			header?.id === sessionId &&
+			typeof header.cwd === "string" &&
+			header.cwd.length > 0 &&
+			resolvePath(header.cwd) === resolvedCwd
+		) {
+			return path;
+		}
 	}
+	return undefined;
 }
 
 function getSessionHeaderCwd(header: SessionHeader): string | undefined {
@@ -750,240 +1023,85 @@ function getSessionHeaderCwd(header: SessionHeader): string | undefined {
 	return typeof cwd === "string" ? cwd : undefined;
 }
 
-function sessionCwdMatches(cwd: string | undefined, resolvedCwd: string): boolean {
-	return cwd !== undefined && cwd !== "" && resolvePath(cwd) === resolvedCwd;
+function sessionCwdMatches(
+	cwd: string | undefined,
+	resolvedCwd: string,
+	legacyPath?: string,
+	legacyAgentDir?: string,
+): boolean {
+	if (cwd) return resolvePath(cwd) === resolvedCwd;
+	if (!legacyPath) return false;
+	return resolvePath(dirname(legacyPath)) === resolvePath(getDefaultSessionDirPath(resolvedCwd, legacyAgentDir));
 }
 
-/** Exported for testing */
-export function findMostRecentSession(sessionDir: string, cwd?: string): string | null {
-	const resolvedSessionDir = normalizePath(sessionDir);
-	const resolvedCwd = cwd ? resolvePath(cwd) : undefined;
-	try {
-		const files = readdirSync(resolvedSessionDir)
-			.filter((file) => file.endsWith(".jsonl"))
-			.map((file) => join(resolvedSessionDir, file))
-			.map((path) => ({ path, mtime: statSync(path).mtimeMs }))
-			.sort((a, b) => b.mtime - a.mtime);
-
-		for (const { path } of files) {
-			const header = readSessionHeaderForDiscovery(path);
-			if (header && (!resolvedCwd || sessionCwdMatches(getSessionHeaderCwd(header), resolvedCwd))) return path;
-		}
-		return null;
-	} catch {
-		// Directory access and stat races make recent-session discovery unavailable.
-		return null;
-	}
-}
-
-function isMessageWithContent(message: AgentMessage): message is Message {
-	return typeof (message as Message).role === "string" && "content" in message;
-}
-
-function extractTextContent(message: Message): string {
-	const content = message.content;
-	if (typeof content === "string") {
-		return content;
-	}
-	return content
-		.filter((block): block is TextContent => block.type === "text")
-		.map((block) => block.text)
-		.join(" ");
-}
-
-function getMessageActivityTime(entry: SessionMessageEntry): number | undefined {
-	const message = entry.message;
-	if (!isMessageWithContent(message)) return undefined;
-	if (message.role !== "user" && message.role !== "assistant") return undefined;
-
-	const msgTimestamp = (message as { timestamp?: number }).timestamp;
-	if (typeof msgTimestamp === "number") {
-		return msgTimestamp;
-	}
-
-	const t = new Date(entry.timestamp).getTime();
-	return Number.isNaN(t) ? undefined : t;
-}
-
-async function buildSessionInfo(
-	filePath: string,
-	signal?: AbortSignal,
-	fileStats?: Stats,
-): Promise<SessionInfo | null> {
-	try {
-		const stats = fileStats ?? (await stat(filePath));
-		let header: SessionHeader | null = null;
-		let messageCount = 0;
-		let firstMessage = "";
-		const allMessages: string[] = [];
-		let name: string | undefined;
-		let lastActivityTime: number | undefined;
-
-		const rl = createInterface({
-			input: createReadStream(filePath, { encoding: "utf8", signal }),
-			crlfDelay: Infinity,
-		});
-
-		for await (const line of rl) {
-			const entry = parseSessionEntryLine(line);
-			if (!entry) continue;
-
-			if (!header) {
-				if (entry.type !== "session") return null;
-				header = entry;
-				continue;
-			}
-
-			// Extract session name (use latest, including explicit clears)
-			if (entry.type === "session_info") {
-				name = entry.name?.trim() || undefined;
-			}
-
-			if (entry.type !== "message") continue;
-			messageCount++;
-
-			const activityTime = getMessageActivityTime(entry);
-			if (typeof activityTime === "number") {
-				lastActivityTime = Math.max(lastActivityTime ?? 0, activityTime);
-			}
-
-			const message = entry.message;
-			if (!isMessageWithContent(message)) continue;
-			if (message.role !== "user" && message.role !== "assistant") continue;
-
-			const textContent = extractTextContent(message);
-			if (!textContent) continue;
-
-			allMessages.push(textContent);
-			if (!firstMessage && message.role === "user") {
-				firstMessage = textContent;
-			}
-		}
-
-		if (!header) return null;
-
-		const cwd = typeof header.cwd === "string" ? header.cwd : "";
-		const parentSessionPath = header.parentSession;
-		const headerTime = typeof header.timestamp === "string" ? new Date(header.timestamp).getTime() : NaN;
-		const modified =
-			typeof lastActivityTime === "number" && lastActivityTime > 0
-				? new Date(lastActivityTime)
-				: !Number.isNaN(headerTime)
-					? new Date(headerTime)
-					: stats.mtime;
-
-		return {
-			path: filePath,
-			id: header.id,
-			cwd,
-			name,
-			parentSessionPath,
-			created: new Date(header.timestamp),
-			modified,
-			messageCount,
-			firstMessage: firstMessage || "(no messages)",
-			allMessagesText: allMessages.join(" "),
-		};
-	} catch {
-		signal?.throwIfAborted();
-		return null;
-	}
-}
-
+/** Import progress reports bytes while reading and entries while writing; listing progress reports sessions. */
 export type SessionListProgress = (
 	loaded: number,
 	total: number,
 	/** Sessions loaded so far, sorted by activity. Present on periodic updates. */
 	partialSessions?: readonly SessionInfo[],
+	stage?: "reading" | "writing" | "listing",
 ) => void;
 
-const MAX_CONCURRENT_SESSION_INFO_LOADS = 10;
-const MAX_CONCURRENT_SESSION_DISCOVERY_LOADS = 64;
 const CURRENT_SESSION_LIST_PUBLISH_INTERVAL = 10;
 const ALL_SESSION_LIST_PUBLISH_INTERVAL = 100;
-
-interface SessionFileCandidate {
-	path: string;
-	stats?: Stats;
-}
-
-async function mapWithConcurrency<T, R>(
-	items: T[],
-	limit: number,
-	map: (item: T, index: number) => Promise<R>,
-	signal?: AbortSignal,
-): Promise<R[]> {
-	const results = new Array<R>(items.length);
-	let nextIndex = 0;
-	const worker = async (): Promise<void> => {
-		while (nextIndex < items.length) {
-			signal?.throwIfAborted();
-			const index = nextIndex++;
-			results[index] = await map(items[index]!, index);
-		}
-	};
-	await Promise.all(Array.from({ length: Math.min(limit, items.length) }, () => worker()));
-	return results;
-}
 
 function sortSessionInfos(sessions: SessionInfo[]): SessionInfo[] {
 	return sessions.sort((a, b) => b.modified.getTime() - a.modified.getTime());
 }
 
-function buildSessionInfosWithConcurrency(
-	files: SessionFileCandidate[],
-	onLoaded: (info: SessionInfo | null, index: number) => void,
-	signal?: AbortSignal,
-): Promise<(SessionInfo | null)[]> {
-	return mapWithConcurrency(
-		files,
-		MAX_CONCURRENT_SESSION_INFO_LOADS,
-		async (file, index) => {
-			const info = await buildSessionInfo(file.path, signal, file.stats);
-			onLoaded(info, index);
-			return info;
-		},
-		signal,
-	);
-}
-
-async function listSessionsFromDir(
-	dir: string,
+async function readSessionInfos(
+	databasePath: string,
+	sessionDir: string,
+	cwd?: string,
 	onProgress?: SessionListProgress,
 	signal?: AbortSignal,
 ): Promise<SessionInfo[]> {
+	await initializeSessionDatabase(databasePath, sessionDir, onProgress, signal);
 	signal?.throwIfAborted();
-	if (!existsSync(dir)) return [];
-
-	try {
-		const dirEntries = await readdir(dir);
-		const files = dirEntries
-			.filter((file) => file.endsWith(".jsonl"))
-			.sort((a, b) => b.localeCompare(a))
-			.map((file) => ({ path: join(dir, file) }));
-		const total = files.length;
-		const partialSessions: SessionInfo[] = [];
-		let loaded = 0;
-		const results = await buildSessionInfosWithConcurrency(
-			files,
-			(info) => {
-				loaded++;
-				if (info) partialSessions.push(info);
-				const publishPartial =
-					loaded === 1 || loaded % CURRENT_SESSION_LIST_PUBLISH_INTERVAL === 0 || loaded === files.length;
-				onProgress?.(loaded, total, publishPartial ? sortSessionInfos([...partialSessions]) : undefined);
-			},
-			signal,
-		);
-		return results.filter((info): info is SessionInfo => info !== null);
-	} catch {
-		signal?.throwIfAborted();
-		return [];
+	const sessions = withSessionDatabase(databasePath, (database) => {
+		const rows =
+			cwd === undefined
+				? database.listSessions()
+				: database.listSessions(cwd, getDefaultSessionDirPath(cwd, sessionDir));
+		return rows.map((session) => ({
+			...session,
+			path: createSessionLocator(databasePath, session.id, session.cwd),
+		}));
+	});
+	const locatorByLegacyPath = new Map<string, string>();
+	for (const session of sessions) {
+		if (session.legacyPath) locatorByLegacyPath.set(resolvePath(session.legacyPath), session.path);
 	}
+	return sessions.map((session) => {
+		const parentPath = session.parentSessionPath;
+		if (!parentPath || parseSessionLocator(parentPath)) return session;
+		const parentLocator = locatorByLegacyPath.get(resolvePath(parentPath));
+		return parentLocator ? { ...session, parentSessionPath: parentLocator } : session;
+	});
+}
+
+function publishSessionList(
+	sessions: SessionInfo[],
+	onProgress: SessionListProgress | undefined,
+	signal: AbortSignal | undefined,
+	interval: number,
+): SessionInfo[] {
+	const partial: SessionInfo[] = [];
+	for (let index = 0; index < sessions.length; index++) {
+		signal?.throwIfAborted();
+		partial.push(sessions[index]!);
+		const loaded = index + 1;
+		if (loaded === 1 || loaded % interval === 0 || loaded === sessions.length) {
+			onProgress?.(loaded, sessions.length, sortSessionInfos([...partial]), "listing");
+			signal?.throwIfAborted();
+		}
+	}
+	return sessions;
 }
 
 /**
- * Manages conversation sessions as append-only trees stored in JSONL files.
+ * Manages conversation sessions as append-only trees stored in a local Turso database.
  *
  * Each session entry has an id and parentId forming a tree structure. The "leaf"
  * pointer tracks the current position. Appending creates a child of the current leaf.
@@ -997,6 +1115,7 @@ export class SessionManager {
 	private sessionId: string = "";
 	private sessionFile: string | undefined;
 	private sessionDir: string;
+	private databasePath: string | undefined;
 	private cwd: string;
 	private persist: boolean;
 	private flushed: boolean = false;
@@ -1013,12 +1132,13 @@ export class SessionManager {
 		persist: boolean,
 		newSessionOptions?: NewSessionOptions,
 		preloadedFileEntries?: FileEntry[],
+		databasePath?: string,
 	) {
 		this.cwd = resolvePath(cwd);
 		this.sessionDir = normalizePath(sessionDir);
 		this.persist = persist;
-		if (persist && this.sessionDir && !existsSync(this.sessionDir)) {
-			mkdirSync(this.sessionDir, { recursive: true });
+		if (persist) {
+			this.databasePath = resolvePath(databasePath ?? getSessionDatabasePath());
 		}
 
 		if (sessionFile) {
@@ -1030,42 +1150,72 @@ export class SessionManager {
 		}
 	}
 
-	/** Switch to a different session file (used for resume and branching) */
+	/** Switch to a session locator or import a legacy JSONL file. */
 	setSessionFile(sessionFile: string): void {
 		this._setSessionFile(sessionFile);
 	}
 
 	private _setSessionFile(sessionFile: string, preloadedFileEntries?: FileEntry[]): void {
-		this.sessionFile = resolvePath(sessionFile);
-		if (existsSync(this.sessionFile)) {
-			const entries = preloadedFileEntries ?? loadEntriesFromFile(this.sessionFile);
-
-			// If file was empty, initialize it with a valid session header. If it was
-			// non-empty but did not parse as a pi session, fail without modifying it.
-			if (entries.length === 0) {
-				const explicitPath = this.sessionFile;
-				if (statSync(explicitPath).size > 0) {
-					throw new Error(`Session file is not a valid ${APP_NAME} session: ${explicitPath}`);
-				}
-				this.newSession();
-				this.sessionFile = explicitPath;
-				this._rewriteFile();
-				this.flushed = true;
-				return;
-			}
-
+		const locator = parseSessionLocator(sessionFile);
+		if (locator) {
+			const entries = getStoredSession(locator.databasePath, locator.sessionId, locator.cwd);
+			if (!entries) throw new Error(`Session not found in local database: ${locator.sessionId}`);
+			const header = entries.find((entry) => entry.type === "session") as SessionHeader | undefined;
+			this.databasePath = locator.databasePath;
+			this.sessionDir = dirname(locator.databasePath);
+			this.sessionFile = createSessionLocator(
+				locator.databasePath,
+				locator.sessionId,
+				header?.cwd ?? locator.cwd ?? this.cwd,
+			);
 			this._loadEntries(entries);
 			this.flushed = true;
-		} else {
-			const explicitPath = this.sessionFile;
-			this.newSession();
-			this.sessionFile = explicitPath; // preserve explicit path from --session flag
+			return;
 		}
+
+		const explicitPath = resolvePath(sessionFile);
+		if (!existsSync(explicitPath)) throw new Error(`Session file not found: ${explicitPath}`);
+		const entries = preloadedFileEntries ?? loadEntriesFromFile(explicitPath, false);
+		if (entries.length === 0) {
+			if (statSync(explicitPath).size === 0) throw new Error(`Session file is empty: ${explicitPath}`);
+			throw new Error(`Session file is not a valid ${APP_NAME} session: ${explicitPath}`);
+		}
+
+		const header = entries.find((entry) => entry.type === "session") as SessionHeader | undefined;
+		if (!header) throw new Error(`Session file is not a valid ${APP_NAME} session: ${explicitPath}`);
+		migrateToCurrentVersion(entries);
+		const databasePath = this.databasePath ?? getSessionDatabasePath(this.sessionDir);
+		this.databasePath = databasePath;
+		const sessionCwd = typeof header.cwd === "string" ? header.cwd : "";
+		const sessionEntries = entries.filter((entry): entry is SessionEntry => entry.type !== "session");
+		const importResult = withSessionDatabase(databasePath, (database) =>
+			database.importSession(header, sessionEntries, explicitPath),
+		);
+		if (importResult === "deleted") throw new Error(`Cannot open deleted legacy session archive: ${explicitPath}`);
+		const storedEntries = getStoredSession(databasePath, header.id, sessionCwd) ?? entries;
+		this.sessionFile = createSessionLocator(databasePath, header.id, sessionCwd);
+		this._loadEntries(storedEntries);
+		this.flushed = true;
 	}
 
 	newSession(options?: NewSessionOptions): string | undefined {
 		if (options?.id !== undefined) {
 			assertValidSessionId(options.id);
+			if (this.persist && this.databasePath) {
+				if (
+					withSessionDatabase(
+						this.databasePath,
+						(database) =>
+							database.hasSession(options.id!, this.cwd) || database.hasDeletedSession(options.id!, this.cwd),
+					)
+				) {
+					throw new Error(`Session id already exists: ${options.id}`);
+				}
+				const legacyArchive = findLegacySessionIdConflict(this.databasePath, this.sessionDir, this.cwd, options.id);
+				if (legacyArchive) {
+					throw new Error(`Session id already exists: ${options.id} (legacy archive: ${legacyArchive})`);
+				}
+			}
 		}
 		this.sessionId = options?.id ?? createSessionId();
 		const timestamp = new Date().toISOString();
@@ -1085,8 +1235,11 @@ export class SessionManager {
 		this.flushed = false;
 
 		if (this.persist) {
-			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
-			this.sessionFile = join(this.getSessionDir(), `${fileTimestamp}_${this.sessionId}.jsonl`);
+			this.sessionFile = createSessionLocator(
+				this.databasePath ?? getSessionDatabasePath(),
+				this.sessionId,
+				this.cwd,
+			);
 		}
 		return this.sessionFile;
 	}
@@ -1131,15 +1284,10 @@ export class SessionManager {
 	}
 
 	private _rewriteFile(): void {
-		if (!this.persist || !this.sessionFile) return;
-		const fd = openSync(this.sessionFile, "w");
-		try {
-			for (const entry of this.fileEntries) {
-				writeFileSync(fd, `${JSON.stringify(entry)}\n`);
-			}
-		} finally {
-			closeSync(fd);
-		}
+		if (!this.persist || !this.databasePath) return;
+		const header = this.getHeader();
+		if (!header) return;
+		withSessionDatabase(this.databasePath, (database) => database.writeSession(header, this.getEntries()));
 	}
 
 	isPersisted(): boolean {
@@ -1155,43 +1303,66 @@ export class SessionManager {
 	}
 
 	usesDefaultSessionDir(): boolean {
-		return this.sessionDir === getDefaultSessionDirPath(this.cwd);
+		return this.databasePath === getSessionDatabasePath();
 	}
 
 	getSessionId(): string {
 		return this.sessionId;
 	}
 
+	/** Opaque session locator accepted by SessionManager.open(). */
 	getSessionFile(): string | undefined {
 		return this.sessionFile;
 	}
 
+	/** Local Turso database file containing this session. */
+	getSessionDatabasePath(): string | undefined {
+		return this.databasePath;
+	}
+
+	/** Ensure session search can read the database, importing legacy archives if needed. */
+	async ensureSessionDatabaseInitialized(onProgress?: SessionListProgress, signal?: AbortSignal): Promise<void> {
+		if (!this.persist || !this.databasePath) return;
+		await initializeSessionDatabase(this.databasePath, this.sessionDir, onProgress, signal);
+	}
+
+	/** Whether this session has been flushed to persistent storage. */
+	hasStoredSession(): boolean {
+		const locator = this.sessionFile ? parseSessionLocator(this.sessionFile) : undefined;
+		const cwd = locator?.cwd ?? this.getHeader()?.cwd ?? this.cwd;
+		if (!this.persist || !this.databasePath) return false;
+		const read = (database: SessionDatabase) => database.hasSession(this.sessionId, cwd);
+		return this.flushed
+			? withExistingSessionDatabase(this.databasePath, read)
+			: withSessionDatabase(this.databasePath, read);
+	}
+
 	_persist(entry: SessionEntry): void {
-		if (!this.persist || !this.sessionFile) return;
+		if (!this.persist || !this.databasePath) return;
 
 		const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
 		if (!hasAssistant) {
 			if (this.flushed) {
-				appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+				const header = this.getHeader();
+				if (header) {
+					withSessionDatabase(this.databasePath, (database) => database.appendEntry(header, entry));
+				}
 			} else {
-				// Mark as not flushed so when assistant arrives, all entries get written
-				this.flushed = false;
+				// Defer storing an empty session until an assistant reply exists.
 			}
 			return;
 		}
 
 		if (!this.flushed) {
-			const fd = openSync(this.sessionFile, "wx");
-			try {
-				for (const e of this.fileEntries) {
-					writeFileSync(fd, `${JSON.stringify(e)}\n`);
-				}
-			} finally {
-				closeSync(fd);
-			}
+			const header = this.getHeader();
+			if (header)
+				withSessionDatabase(this.databasePath, (database) => database.createSession(header, this.getEntries()));
 			this.flushed = true;
 		} else {
-			appendFileSync(this.sessionFile, `${JSON.stringify(entry)}\n`);
+			const header = this.getHeader();
+			if (header) {
+				withSessionDatabase(this.databasePath, (database) => database.appendEntry(header, entry));
+			}
 		}
 	}
 
@@ -1643,9 +1814,9 @@ export class SessionManager {
 	}
 
 	/**
-	 * Create a new session file containing only the path from root to the specified leaf.
+	 * Create a new database session containing only the path from root to the specified leaf.
 	 * Useful for extracting a single conversation path from a branched session.
-	 * Returns the new session file path, or undefined if not persisting.
+	 * Returns the new session locator, or undefined if not persisting.
 	 */
 	createBranchedSession(leafId: string): string | undefined {
 		const previousSessionFile = this.sessionFile;
@@ -1687,8 +1858,10 @@ export class SessionManager {
 
 		const newSessionId = createSessionId();
 		const timestamp = new Date().toISOString();
-		const fileTimestamp = timestamp.replace(/[:.]/g, "-");
-		const newSessionFile = join(this.getSessionDir(), `${fileTimestamp}_${newSessionId}.jsonl`);
+		const newSessionFile =
+			this.persist && this.databasePath
+				? createSessionLocator(this.databasePath, newSessionId, this.cwd)
+				: undefined;
 
 		const header: SessionHeader = {
 			type: "session",
@@ -1732,14 +1905,12 @@ export class SessionManager {
 			this.sessionFile = newSessionFile;
 			this._buildIndex();
 
-			// Only write the file now if it contains an assistant message.
-			// Otherwise defer to _persist(), which creates the file on the
-			// first assistant response, matching the newSession() contract
-			// and avoiding the duplicate-header bug when _persist()'s
-			// no-assistant guard later resets flushed to false.
+			// Defer inserting sessions without an assistant response, matching newSession().
 			const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
 			if (hasAssistant) {
-				this._rewriteFile();
+				if (this.databasePath) {
+					withSessionDatabase(this.databasePath, (database) => database.createSession(header, this.getEntries()));
+				}
 				this.flushed = true;
 			} else {
 				this.flushed = false;
@@ -1770,56 +1941,69 @@ export class SessionManager {
 	}
 
 	/**
-	 * Create a new session.
+	 * Create a new session in the shared local database.
 	 * @param cwd Working directory (stored in session header)
-	 * @param sessionDir Optional session directory. If omitted, uses default (~/.pi/agent/sessions/<encoded-cwd>/).
+	 * @param sessionDir Optional database directory. If omitted, uses ~/.pi/agent/sessions.db.
 	 */
 	static create(cwd: string, sessionDir?: string, options?: NewSessionOptions): SessionManager {
-		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
-		return new SessionManager(cwd, dir, undefined, true, options);
+		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultAgentDir();
+		return new SessionManager(cwd, dir, undefined, true, options, undefined, getSessionDatabasePath(sessionDir));
 	}
 
 	/**
-	 * Open a specific session file.
-	 * @param path Path to session file
-	 * @param sessionDir Optional session directory for /new or /branch. If omitted, derives from file's parent.
+	 * Open a session locator or import a legacy JSONL session into the local database.
+	 * @param path Session locator or legacy JSONL path
+	 * @param sessionDir Optional database directory for /new or /branch.
 	 * @param cwdOverride Optional cwd override instead of the session header cwd.
 	 */
 	static open(path: string, sessionDir?: string, cwdOverride?: string): SessionManager {
-		const resolvedPath = resolvePath(path);
+		const locator = parseSessionLocator(path);
+		const resolvedPath = locator ? path : resolvePath(path);
 		let header: SessionHeader | null = null;
 		let preloadedFileEntries: FileEntry[] | undefined;
-		if (cwdOverride === undefined && existsSync(resolvedPath)) {
+		if (locator) {
+			const entries = getStoredSession(locator.databasePath, locator.sessionId, locator.cwd);
+			const firstEntry = entries?.[0];
+			header = firstEntry?.type === "session" ? firstEntry : null;
+		} else if (cwdOverride === undefined && existsSync(resolvedPath)) {
 			try {
 				header = readSessionHeader(resolvedPath);
 			} catch (error) {
 				if (!(error instanceof SessionHeaderScanLimitError)) throw error;
 				// The bounded scan is only a discovery optimization. A full load remains
 				// authoritative for legacy files with very large headers or prefixes.
-				preloadedFileEntries = loadEntriesFromFile(resolvedPath);
+				preloadedFileEntries = loadEntriesFromFile(resolvedPath, false);
 				const firstEntry = preloadedFileEntries[0];
 				header = firstEntry?.type === "session" ? firstEntry : null;
 			}
 		}
 		const cwd = cwdOverride ?? (header ? getSessionHeaderCwd(header) : undefined) ?? process.cwd();
-		// If no sessionDir provided, derive from file's parent directory
-		const dir = sessionDir ? normalizePath(sessionDir) : resolve(resolvedPath, "..");
-		return new SessionManager(cwd, dir, resolvedPath, true, undefined, preloadedFileEntries);
+		const databasePath = locator?.databasePath ?? getSessionDatabasePath(sessionDir);
+		const dir = locator
+			? dirname(locator.databasePath)
+			: sessionDir
+				? normalizePath(sessionDir)
+				: getDefaultAgentDir();
+		return new SessionManager(cwd, dir, resolvedPath, true, undefined, preloadedFileEntries, databasePath);
 	}
 
 	/**
 	 * Continue the most recent session, or create new if none.
 	 * @param cwd Working directory
-	 * @param sessionDir Optional session directory. If omitted, uses default (~/.pi/agent/sessions/<encoded-cwd>/).
+	 * @param sessionDir Optional database directory. If omitted, uses ~/.pi/agent/sessions.db.
 	 */
-	static continueRecent(cwd: string, sessionDir?: string): SessionManager {
-		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
-		const filterCwd = sessionDir !== undefined && dir !== getDefaultSessionDirPath(cwd);
-		const mostRecent = findMostRecentSession(dir, filterCwd ? cwd : undefined);
+	static async continueRecent(cwd: string, sessionDir?: string): Promise<SessionManager> {
+		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultAgentDir();
+		const databasePath = getSessionDatabasePath(sessionDir);
+		const resolvedCwd = resolvePath(cwd);
+		const sessions = await readSessionInfos(databasePath, dir, resolvedCwd);
+		const mostRecent = sessions.find((session) =>
+			sessionCwdMatches(session.cwd, resolvedCwd, session.legacyPath, dir),
+		);
 		if (mostRecent) {
-			return new SessionManager(cwd, dir, mostRecent, true);
+			return new SessionManager(cwd, dir, mostRecent.path, true, undefined, undefined, databasePath);
 		}
-		return new SessionManager(cwd, dir, undefined, true);
+		return new SessionManager(cwd, dir, undefined, true, undefined, undefined, databasePath);
 	}
 
 	/** Create an in-memory session (no file persistence), optionally from entries held outside the filesystem. */
@@ -1829,42 +2013,47 @@ export class SessionManager {
 
 	/**
 	 * Fork a session from another project directory into the current project.
-	 * Creates a new session in the target cwd with the full history from the source session.
-	 * @param sourcePath Path to the source session file
+	 * Creates a new database session in the target cwd with the source session's full history.
+	 * @param sourcePath Session locator or legacy JSONL file path
 	 * @param targetCwd Target working directory (where the new session will be stored)
-	 * @param sessionDir Optional session directory. If omitted, uses default for targetCwd.
+	 * @param sessionDir Optional database directory. If omitted, uses ~/.pi/agent/sessions.db.
 	 */
-	static forkFrom(
+	static async forkFrom(
 		sourcePath: string,
 		targetCwd: string,
 		sessionDir?: string,
 		options?: NewSessionOptions,
-	): SessionManager {
-		const resolvedSourcePath = resolvePath(sourcePath);
+	): Promise<SessionManager> {
+		const sourceLocator = parseSessionLocator(sourcePath);
+		const resolvedSourcePath = sourceLocator ? sourcePath : resolvePath(sourcePath);
 		const resolvedTargetCwd = resolvePath(targetCwd);
-		const sourceEntries = loadEntriesFromFile(resolvedSourcePath);
+		const sourceEntries = sourceLocator
+			? (getStoredSession(sourceLocator.databasePath, sourceLocator.sessionId, sourceLocator.cwd) ?? [])
+			: await loadEntriesFromFileAsync(resolvedSourcePath, undefined, () => {});
 		if (sourceEntries.length === 0) {
-			throw new Error(`Cannot fork: source session file is empty or invalid: ${resolvedSourcePath}`);
+			throw new Error(`Cannot fork: source session is empty or invalid: ${resolvedSourcePath}`);
 		}
 
 		const sourceHeader = sourceEntries.find((e) => e.type === "session") as SessionHeader | undefined;
 		if (!sourceHeader) {
 			throw new Error(`Cannot fork: source session has no header: ${resolvedSourcePath}`);
 		}
+		migrateToCurrentVersion(sourceEntries);
 
-		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(resolvedTargetCwd);
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
-		}
+		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultAgentDir();
+		const databasePath = getSessionDatabasePath(sessionDir);
+		await initializeSessionDatabase(databasePath, dir);
 
-		// Create new session file with new ID but forked content
+		// Create a new database session with a new ID and copied entries.
 		if (options?.id !== undefined) {
 			assertValidSessionId(options.id);
 		}
 		const newSessionId = options?.id ?? createSessionId();
+		if (withSessionDatabase(databasePath, (database) => database.hasSession(newSessionId, resolvedTargetCwd))) {
+			throw new Error(`Session id already exists: ${newSessionId}`);
+		}
 		const timestamp = new Date().toISOString();
-		const fileTimestamp = timestamp.replace(/[:.]/g, "-");
-		const newSessionFile = join(dir, `${fileTimestamp}_${newSessionId}.jsonl`);
+		const newSessionFile = createSessionLocator(databasePath, newSessionId, resolvedTargetCwd);
 
 		// Write new header pointing to source as parent, with updated cwd
 		const newHeader: SessionHeader = {
@@ -1875,48 +2064,52 @@ export class SessionManager {
 			cwd: resolvedTargetCwd,
 			parentSession: resolvedSourcePath,
 		};
-		writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
-
-		// Copy all non-header entries from source
-		for (const entry of sourceEntries) {
-			if (entry.type !== "session") {
-				appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
-			}
-		}
-
-		return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true);
+		const sessionEntries = sourceEntries.filter((entry): entry is SessionEntry => entry.type !== "session");
+		withSessionDatabase(databasePath, (database) => database.createSession(newHeader, sessionEntries));
+		return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true, undefined, undefined, databasePath);
 	}
 
 	/**
-	 * Find an exact session ID without loading transcript bodies.
-	 * @param cwd Working directory (used to compute default session directory)
+	 * Find an exact session ID by project cwd after importing legacy archives.
+	 * @param cwd Working directory
 	 * @param id Exact session ID
-	 * @param sessionDir Optional session directory. If omitted, uses default (~/.pi/agent/sessions/<encoded-cwd>/).
+	 * @param sessionDir Optional database directory. If omitted, uses ~/.pi/agent/sessions.db.
 	 */
-	static findById(cwd: string, id: string, sessionDir?: string): string | undefined {
-		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
-		const filterCwd = sessionDir !== undefined && dir !== getDefaultSessionDirPath(cwd);
+	static async findById(cwd: string, id: string, sessionDir?: string): Promise<string | undefined> {
+		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultAgentDir();
+		const databasePath = getSessionDatabasePath(sessionDir);
 		const resolvedCwd = resolvePath(cwd);
+		await initializeSessionDatabase(databasePath, dir);
+		const match = withSessionDatabase(databasePath, (database) =>
+			database
+				.findSessionsById(id)
+				.find((session) => sessionCwdMatches(session.cwd, resolvedCwd, session.legacy_path ?? undefined, dir)),
+		);
+		return match ? createSessionLocator(databasePath, match.id, match.cwd) : undefined;
+	}
 
-		try {
-			for (const file of readdirSync(dir)) {
-				if (!file.endsWith(".jsonl")) continue;
-				const path = join(dir, file);
-				const header = readSessionHeaderForDiscovery(path);
-				if (header?.id !== id) continue;
-				if (filterCwd && !sessionCwdMatches(getSessionHeaderCwd(header), resolvedCwd)) continue;
-				return path;
-			}
-		} catch {
-			// Exact session discovery is best-effort, matching list().
-		}
-		return undefined;
+	/** Delete one persisted session from its local Turso database. */
+	static delete(path: string): boolean {
+		const locator = parseSessionLocator(path);
+		if (!locator) throw new Error("Only Turso session locators can be deleted");
+		return withExistingSessionDatabase(locator.databasePath, (database) =>
+			database.deleteSession(locator.sessionId, locator.cwd),
+		);
+	}
+
+	/** Restore a session moved to the database's trash table. */
+	static restoreDeleted(path: string): boolean {
+		const locator = parseSessionLocator(path);
+		if (!locator) throw new Error("Only Turso session locators can be restored");
+		return withExistingSessionDatabase(locator.databasePath, (database) =>
+			database.restoreSession(locator.sessionId, locator.cwd),
+		);
 	}
 
 	/**
-	 * List all sessions for a directory.
-	 * @param cwd Working directory (used to compute default session directory)
-	 * @param sessionDir Optional session directory. If omitted, uses default (~/.pi/agent/sessions/<encoded-cwd>/).
+	 * List sessions for one project cwd.
+	 * @param cwd Working directory
+	 * @param sessionDir Optional database directory. If omitted, uses ~/.pi/agent/sessions.db.
 	 * @param onProgress Optional callback for progress updates (loaded, total)
 	 */
 	static async list(
@@ -1925,15 +2118,16 @@ export class SessionManager {
 		onProgress?: SessionListProgress,
 		signal?: AbortSignal,
 	): Promise<SessionInfo[]> {
-		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultSessionDir(cwd);
-		const filterCwd = sessionDir !== undefined && dir !== getDefaultSessionDirPath(cwd);
+		signal?.throwIfAborted();
+		const dir = sessionDir ? normalizePath(sessionDir) : getDefaultAgentDir();
+		const databasePath = getSessionDatabasePath(sessionDir);
 		const resolvedCwd = resolvePath(cwd);
-		const includeSession = (session: SessionInfo) => !filterCwd || sessionCwdMatches(session.cwd, resolvedCwd);
-		const progress: SessionListProgress | undefined = onProgress
-			? (loaded, total, partialSessions) => onProgress(loaded, total, partialSessions?.filter(includeSession))
-			: undefined;
-		const sessions = (await listSessionsFromDir(dir, progress, signal)).filter(includeSession);
-		return sortSessionInfos(sessions);
+		const sessions = await readSessionInfos(databasePath, dir, resolvedCwd, onProgress, signal);
+		const filtered = sessions.filter((session) =>
+			sessionCwdMatches(session.cwd, resolvedCwd, session.legacyPath, dir),
+		);
+		publishSessionList(filtered, onProgress, signal, CURRENT_SESSION_LIST_PUBLISH_INTERVAL);
+		return sortSessionInfos(filtered);
 	}
 
 	/**
@@ -1964,72 +2158,10 @@ export class SessionManager {
 				? signal
 				: (onProgressOrSignal ?? signal);
 		abortSignal?.throwIfAborted();
-		if (customSessionDir) {
-			return sortSessionInfos(await listSessionsFromDir(customSessionDir, progress, abortSignal));
-		}
-
-		const sessionsDir = getSessionsDir();
-
-		try {
-			if (!existsSync(sessionsDir)) return [];
-			const entries = await readdir(sessionsDir, { withFileTypes: true });
-			const dirs = entries
-				.filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
-				.map((entry) => join(sessionsDir, entry.name));
-
-			const dirFiles = await mapWithConcurrency(
-				dirs,
-				MAX_CONCURRENT_SESSION_DISCOVERY_LOADS,
-				async (dir) => {
-					try {
-						return (await readdir(dir)).filter((file) => file.endsWith(".jsonl")).map((file) => join(dir, file));
-					} catch {
-						return [];
-					}
-				},
-				abortSignal,
-			);
-			const allFiles = dirFiles.flat();
-			const candidates = await mapWithConcurrency(
-				allFiles,
-				MAX_CONCURRENT_SESSION_DISCOVERY_LOADS,
-				async (path): Promise<SessionFileCandidate> => {
-					try {
-						return { path, stats: await stat(path) };
-					} catch {
-						return { path };
-					}
-				},
-				abortSignal,
-			);
-			candidates.sort(
-				(a, b) =>
-					(b.stats?.mtimeMs ?? Number.NEGATIVE_INFINITY) - (a.stats?.mtimeMs ?? Number.NEGATIVE_INFINITY) ||
-					basename(b.path).localeCompare(basename(a.path)),
-			);
-
-			const totalFiles = candidates.length;
-			let loaded = 0;
-			let firstCandidateLoaded = false;
-			const partialSessions: SessionInfo[] = [];
-			const results = await buildSessionInfosWithConcurrency(
-				candidates,
-				(info, index) => {
-					loaded++;
-					if (index === 0) firstCandidateLoaded = true;
-					if (info) partialSessions.push(info);
-					const publishPartial =
-						firstCandidateLoaded &&
-						(index === 0 || loaded % ALL_SESSION_LIST_PUBLISH_INTERVAL === 0 || loaded === totalFiles);
-					progress?.(loaded, totalFiles, publishPartial ? sortSessionInfos([...partialSessions]) : undefined);
-				},
-				abortSignal,
-			);
-
-			return sortSessionInfos(results.filter((info): info is SessionInfo => info !== null));
-		} catch {
-			abortSignal?.throwIfAborted();
-			return [];
-		}
+		const dir = customSessionDir ?? getDefaultAgentDir();
+		const databasePath = getSessionDatabasePath(customSessionDir);
+		const sessions = await readSessionInfos(databasePath, dir, undefined, progress, abortSignal);
+		publishSessionList(sessions, progress, abortSignal, ALL_SESSION_LIST_PUBLISH_INTERVAL);
+		return sortSessionInfos(sessions);
 	}
 }

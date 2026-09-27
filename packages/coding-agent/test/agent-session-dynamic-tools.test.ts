@@ -79,7 +79,7 @@ describe("AgentSession dynamic tool registration", () => {
 		await bashTool.execute("bash-env", { command: "printf ok" });
 		expect(sessionEnv).toMatchObject({
 			PI_SESSION_ID: session.sessionId,
-			PI_SESSION_FILE: session.sessionFile,
+			PI_SESSION_FILE: session.sessionManager.getSessionDatabasePath(),
 			PI_PROVIDER: model.provider,
 			PI_MODEL: model.id,
 			PI_REASONING_LEVEL: session.thinkingLevel,

@@ -402,7 +402,7 @@ Fired when a session is started, loaded, or reloaded.
 ```typescript
 pi.on("session_start", async (event, ctx) => {
   // event.reason - "startup" | "reload" | "new" | "resume" | "fork"
-  // event.previousSessionFile - present for "new", "resume", and "fork"
+  // event.previousSessionFile - session locator, present for "new", "resume", and "fork"
   ctx.ui.notify(`Session: ${ctx.sessionManager.getSessionFile() ?? "ephemeral"}`, "info");
 });
 ```
@@ -425,7 +425,7 @@ Fired before starting a new session (`/new`) or switching sessions (`/resume`).
 ```typescript
 pi.on("session_before_switch", async (event, ctx) => {
   // event.reason - "new" or "resume"
-  // event.targetSessionFile - session we're switching to (only for "resume")
+  // event.targetSessionFile - session locator, or legacy JSONL path before import
 
   if (event.reason === "new") {
     const ok = await ctx.ui.confirm("Clear?", "Delete all messages?");
@@ -525,7 +525,7 @@ Fired before a started session runtime is torn down. Use this to clean up resour
 ```typescript
 pi.on("session_shutdown", async (event, ctx) => {
   // event.reason - "quit" | "reload" | "new" | "resume" | "fork"
-  // event.targetSessionFile - destination session for session replacement flows
+  // event.targetSessionFile - destination session locator for replacement flows
   // Cleanup, save state, etc.
 });
 ```
@@ -1259,13 +1259,13 @@ if (result.cancelled) {
 ```
 
 Options:
-- `parentSession`: parent session file to record in the new session header
+- `parentSession`: parent session locator or legacy JSONL path to record in the new session header
 - `setup`: mutate the new session's `SessionManager` before `withSession` runs
 - `withSession`: run post-switch work against a fresh replacement-session context. Do not use captured old `pi` / command `ctx`; see [Session replacement lifecycle and footguns](#session-replacement-lifecycle-and-footguns).
 
 ### ctx.fork(entryId, options?)
 
-Fork from a specific entry, creating a new session file:
+Fork from a specific entry, creating a new database session:
 
 ```typescript
 const result = await ctx.fork("entry-id-123", {
@@ -1310,7 +1310,7 @@ Options:
 
 ### ctx.switchSession(sessionPath, options?)
 
-Switch to a different session file:
+Switch to a session locator or legacy JSONL path:
 
 ```typescript
 const result = await ctx.switchSession("/path/to/session.jsonl", {

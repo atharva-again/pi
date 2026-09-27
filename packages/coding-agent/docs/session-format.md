@@ -1,20 +1,18 @@
-# Session File Format
+# Session JSONL Format
 
-Sessions are stored as JSONL (JSON Lines) files. Each line is a JSON object with a `type` field. Session entries form a tree structure via `id`/`parentId` fields, enabling in-place branching without creating new files.
+Pi stores sessions in a local embedded Turso database at `~/.pi/agent/sessions.db`. It does not use Turso Cloud. JSONL (JSON Lines) is the import/export format: each line is a JSON object with a `type` field, and entry `id`/`parentId` fields form the session tree.
 
-## File Location
+## Database Location and Import
 
-```
-~/.pi/agent/sessions/--<path>--/<timestamp>_<session-id>.jsonl
-```
+All projects share `~/.pi/agent/sessions.db`; each session stores its working directory for project filtering. With `--session-dir <dir>`, the database is `<dir>/sessions.db`.
 
-By default, `<session-id>` is a UUID. Callers can supply a custom ID through the SDK or `--session-id`. For `<path>`, Pi removes the leading path separator and replaces `/`, `\\`, and `:` with `-`.
+On first use, Pi imports existing JSONL sessions from the agent session directories without rewriting or deleting their contents. Opening a legacy JSONL path imports that session too. Use `/export` or `exportSessionToJsonl()` to create portable JSONL.
 
-## Deleting Sessions
+`SessionInfo.path` and `SessionManager.getSessionFile()` return an opaque `pi-session://` locator, not a filesystem path. Pass it back to `SessionManager.open()` to reopen that session. The database file path is available from `SessionManager.getSessionDatabasePath()`.
 
-Sessions can be removed by deleting their `.jsonl` files under `~/.pi/agent/sessions/`.
+By default, `<session-id>` is a UUID. Callers can supply a custom ID through the SDK or `--session-id`.
 
-Pi also supports deleting sessions interactively from `/resume` (select a session and press `Ctrl+D`, then confirm). When available, pi uses the `trash` CLI to avoid permanent deletion.
+Deleting a session from `/resume` moves it to the database's internal trash table. Legacy JSONL source files are left untouched.
 
 ## Session Version
 
@@ -24,7 +22,7 @@ Sessions have a version field in the header:
 - **Version 2**: Tree structure with `id`/`parentId` linking
 - **Version 3**: Renamed `hookMessage` role to `custom` (extensions unification)
 
-Existing sessions are automatically migrated to the current version (v3) when loaded.
+Imported sessions are automatically migrated to the current entry version (v3) when loaded.
 
 ## Source Files
 
@@ -442,10 +440,10 @@ Key methods for working with sessions programmatically.
 
 ### Static Creation Methods
 - `SessionManager.create(cwd, sessionDir?, options?)` - New session; `options` can set `id` and `parentSession`
-- `SessionManager.open(path, sessionDir?, cwdOverride?)` - Open existing session file
-- `SessionManager.continueRecent(cwd, sessionDir?)` - Continue most recent or create new
+- `SessionManager.open(locatorOrJsonlPath, sessionDir?, cwdOverride?)` - Open a database session or import a legacy JSONL session
+- `await SessionManager.continueRecent(cwd, sessionDir?)` - Import legacy archives, then continue most recent or create new
 - `SessionManager.inMemory(cwd?, options?, entries?)` - No file persistence, optionally initialized from entries
-- `SessionManager.forkFrom(sourcePath, targetCwd, sessionDir?, options?)` - Fork session from another project
+- `await SessionManager.forkFrom(sourcePath, targetCwd, sessionDir?, options?)` - Import target archives, then fork a session from another project
 
 ### Static Listing Methods
 - `SessionManager.list(cwd, sessionDir?, onProgress?)` - List sessions for a directory
@@ -454,8 +452,8 @@ Key methods for working with sessions programmatically.
 
 ### Instance Methods - Session Management
 - `newSession(options?)` - Start a new session (options: `{ id?: string, parentSession?: string }`)
-- `setSessionFile(path)` - Switch to a different session file
-- `createBranchedSession(leafId)` - Extract branch to new session file
+- `setSessionFile(locatorOrJsonlPath)` - Switch to another session or import a legacy JSONL session
+- `createBranchedSession(leafId)` - Extract a branch into a new database session
 
 ### Instance Methods - Appending (all return entry ID)
 - `appendMessage(message)` - Add message
@@ -487,7 +485,8 @@ Key methods for working with sessions programmatically.
 - `getHeader()` - Session header metadata
 - `getSessionName()` - Get display name from latest session_info entry
 - `getCwd()` - Working directory
-- `getSessionDir()` - Session storage directory
+- `getSessionDir()` - Session database directory
 - `getSessionId()` - Session UUID
-- `getSessionFile()` - Session file path (undefined for in-memory)
+- `getSessionFile()` - Opaque session locator (undefined for in-memory)
+- `getSessionDatabasePath()` - Local Turso database file path (undefined for in-memory)
 - `isPersisted()` - Whether session is saved to disk

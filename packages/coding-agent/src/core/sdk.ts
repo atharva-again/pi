@@ -15,7 +15,7 @@ import { ModelRuntime } from "./model-runtime.ts";
 import { mergeProviderAttributionHeaders } from "./provider-attribution.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
-import { getDefaultSessionDir, SessionManager } from "./session-manager.ts";
+import { SessionManager } from "./session-manager.ts";
 import { SettingsManager } from "./settings-manager.ts";
 import { time } from "./timings.ts";
 import {
@@ -27,7 +27,9 @@ import {
 	createLsTool,
 	createPowerShellTool,
 	createReadOnlyTools,
+	createReadSessionContextTool,
 	createReadTool,
+	createSearchSessionsTool,
 	createWriteTool,
 	type ToolName,
 	withFileMutationQueue,
@@ -58,7 +60,7 @@ export interface CreateAgentSessionOptions {
 	 * Optional default tool suppression mode when no explicit allowlist is provided.
 	 *
 	 * - "all": start with no tools enabled
-	 * - "builtin": disable the default built-in tools (read, bash, edit, write)
+	 * - "builtin": disable the default built-in tools (read, bash, edit, write, search_sessions, read_session_context)
 	 *   but keep extension/custom tools enabled
 	 */
 	noTools?: "all" | "builtin";
@@ -67,7 +69,7 @@ export interface CreateAgentSessionOptions {
 	 *
 	 * When omitted, pi uses the `defaultTools` setting for the initial built-in
 	 * selection when configured. Otherwise it enables the default built-in tools
-	 * (read, bash, edit, write). Extension/custom tools remain enabled unless
+	 * (read, bash, edit, write, search_sessions, read_session_context). Extension/custom tools remain enabled unless
 	 * `noTools` changes that default. When provided, only the listed tool names are
 	 * enabled.
 	 */
@@ -121,6 +123,7 @@ export {
 	// Tool factories (for custom cwd)
 	createCodingTools,
 	createReadOnlyTools,
+	createReadSessionContextTool,
 	createReadTool,
 	createBashTool,
 	createEditTool,
@@ -129,6 +132,7 @@ export {
 	createFindTool,
 	createLsTool,
 	createPowerShellTool,
+	createSearchSessionsTool,
 };
 
 // Helper Functions
@@ -182,7 +186,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const modelRuntime = options.modelRuntime ?? (await ModelRuntime.create({ authPath, modelsPath }));
 
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
-	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, getDefaultSessionDir(cwd, agentDir));
+	const sessionManager = options.sessionManager ?? SessionManager.create(cwd, agentDir);
 
 	if (!resourceLoader) {
 		resourceLoader = new DefaultResourceLoader({ cwd, agentDir, settingsManager });
@@ -255,7 +259,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		thinkingLevel = clampThinkingLevel(model, thinkingLevel) as ThinkingLevel;
 	}
 
-	const defaultActiveToolNames: ToolName[] = ["read", "bash", "edit", "write"];
+	const defaultActiveToolNames: ToolName[] = [
+		"read",
+		"bash",
+		"edit",
+		"write",
+		"search_sessions",
+		"read_session_context",
+	];
 	const configuredDefaultToolNames = settingsManager.getDefaultTools();
 	const allowedToolNames = options.tools ?? (options.noTools === "all" ? [] : undefined);
 	const excludedToolNames = options.excludeTools;

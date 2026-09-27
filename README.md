@@ -90,3 +90,7 @@ As you can see, the first two features are implemented were inspired by Codex CL
 ### 7. Codex Usage Status
 
 Added a `/status` extension for checking live ChatGPT Codex usage. It displays 5-hour and 7-day limits, credits, reset information, and blocked states, with RPC notifications for Telegram clients. See PR https://github.com/atharva-again/pi/pull/22 and the [extension source](https://github.com/atharva-again/pi/blob/main/packages/coding-agent/examples/extensions/codex-status.ts).
+
+### 8. Local Session Storage and Search
+
+Sessions are stored in an embedded local Turso database at `~/.pi/agent/sessions.db`. Existing JSONL session archives remain importable, and transcripts can be searched from Pi. See PR https://github.com/atharva-again/pi/pull/25 for more info.

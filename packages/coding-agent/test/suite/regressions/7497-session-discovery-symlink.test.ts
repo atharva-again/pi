@@ -38,7 +38,7 @@ describe("regression #7497: discover sessions through symlinked directories", ()
 		);
 	}
 
-	it("discovers a session through a directory link and preserves the alias path", async () => {
+	it("discovers a session through a directory link and preserves the alias archive path", async () => {
 		const targetDir = join(tempDir, "linked-sessions");
 		writeSession(targetDir, "linked");
 		const aliasDir = join(sessionsDir, "--linked--");
@@ -47,7 +47,8 @@ describe("regression #7497: discover sessions through symlinked directories", ()
 		const sessions = await SessionManager.listAll();
 
 		expect(sessions.map((session) => session.id)).toEqual(["linked"]);
-		expect(sessions[0]?.path).toBe(join(aliasDir, "linked.jsonl"));
+		expect(sessions[0]?.path).toMatch(/^pi-session:\/\//);
+		expect(sessions[0]?.legacyPath).toBe(join(aliasDir, "linked.jsonl"));
 	});
 
 	it("ignores a broken directory link without hiding valid sessions", async () => {

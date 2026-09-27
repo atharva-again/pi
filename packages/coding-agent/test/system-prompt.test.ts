@@ -82,6 +82,8 @@ describe("buildSystemPrompt", () => {
 					bash: "Execute bash commands",
 					edit: "Make surgical edits",
 					write: "Create or overwrite files",
+					search_sessions: "Search past sessions",
+					read_session_context: "Read nearby session context",
 				},
 				contextFiles: [],
 				skills: [],
@@ -92,6 +94,8 @@ describe("buildSystemPrompt", () => {
 			expect(prompt).toContain("- bash:");
 			expect(prompt).toContain("- edit:");
 			expect(prompt).toContain("- write:");
+			expect(prompt).toContain("- search_sessions:");
+			expect(prompt).toContain("- read_session_context:");
 		});
 
 		test.each([

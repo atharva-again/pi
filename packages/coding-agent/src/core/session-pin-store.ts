@@ -3,6 +3,7 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, wri
 import { dirname } from "node:path";
 import lockfile from "proper-lockfile";
 import { canonicalizePath, resolvePath } from "../utils/paths.ts";
+import { hasStoredSessionLocator, isSessionLocatorPath } from "./session-manager.ts";
 
 type SessionPinsFile = Record<string, true>;
 
@@ -105,14 +106,38 @@ export class SessionPinStore {
 		return new Set(Object.keys(readSessionPins(this.pinsPath)));
 	}
 
+	migratePinnedPath(previousPath: string, sessionLocator: string): void {
+		if (!isSessionLocatorPath(sessionLocator) || !hasStoredSessionLocator(sessionLocator)) {
+			throw new Error(`Session no longer exists: ${sessionLocator}`);
+		}
+		const previousPinPath = isSessionLocatorPath(previousPath)
+			? previousPath
+			: canonicalizePath(resolvePath(previousPath));
+		this.replacePinnedPath(previousPinPath, sessionLocator);
+	}
+
+	private replacePinnedPath(previousPinPath: string, nextPinPath: string): void {
+		const release = acquireSessionPinsLock(this.pinsPath);
+		try {
+			const pins = readSessionPins(this.pinsPath);
+			if (!Object.hasOwn(pins, previousPinPath)) return;
+			delete pins[previousPinPath];
+			pins[nextPinPath] = true;
+			writeSessionPins(this.pinsPath, pins);
+		} finally {
+			release();
+		}
+	}
+
 	setPinned(sessionPath: string, pinned: boolean): void {
 		const release = acquireSessionPinsLock(this.pinsPath);
 		try {
-			if (pinned && !existsSync(sessionPath)) {
-				throw new Error(`Session file no longer exists: ${sessionPath}`);
+			const isLocator = isSessionLocatorPath(sessionPath);
+			if (pinned && !(isLocator ? hasStoredSessionLocator(sessionPath) : existsSync(sessionPath))) {
+				throw new Error(`${isLocator ? "Session" : "Session file"} no longer exists: ${sessionPath}`);
 			}
 			const pins = readSessionPins(this.pinsPath);
-			const normalizedPath = canonicalizePath(resolvePath(sessionPath));
+			const normalizedPath = isLocator ? sessionPath : canonicalizePath(resolvePath(sessionPath));
 			if (pinned) {
 				if (pins[normalizedPath]) return;
 				pins[normalizedPath] = true;

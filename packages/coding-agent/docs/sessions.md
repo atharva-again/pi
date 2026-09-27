@@ -4,20 +4,36 @@ Pi saves conversations as sessions so you can continue work, branch from earlier
 
 ## Session Storage
 
-Sessions auto-save to `~/.pi/agent/sessions/`, organized by working directory. Each session is a JSONL file with a tree structure.
+Sessions are stored in one local Turso database at `~/.pi/agent/sessions.db`. The embedded database runs in-process; pi does not connect to Turso Cloud or start a database server. Sessions for all working directories share this database, and the session picker filters by project.
+
+Pi imports existing JSONL sessions into the database on first use without rewriting or deleting their contents. JSONL remains available for import and export. A custom `--session-dir` stores its database as `sessions.db` inside that directory.
 
 ```bash
 pi -c                  # Continue most recent session
 pi -r                  # Browse and select from past sessions
 pi --no-session        # Ephemeral mode; do not save
 pi --name "my task"    # Set session display name at startup
-pi --session <path|id> # Use a specific session file or partial session ID
-pi --fork <path|id>    # Fork a session file or partial session ID into a new session
+pi --session <path|id> # Use a specific session or partial session ID
+pi --fork <path|id>    # Fork a session or partial session ID into a new session
 ```
 
-Use `/session` in interactive mode to see the current session file, session ID, message count, tokens, and cost.
+Use `/session` in interactive mode to see the database location, session ID, message count, tokens, and cost.
 
 For the JSONL file format and SessionManager API, see [Session Format](session-format.md).
+
+## Searching Past Sessions
+
+The built-in `search_sessions` tool searches the current session database with Tantivy. Its default `repository` scope covers the current Git repository's registered worktrees and searches every transcript branch. Use `scope: "all"` to search all sessions in that database. In a directory that is not a Git repository, the default scope is that directory tree. Sessions from removed worktrees, or sessions with no recorded working directory, can be found with the `all` scope. The first search may import legacy JSONL archives into the database; later searches use the index directly.
+
+Search returns bounded excerpts and a `session_id`, `cwd`, and `entry_id` reference. Pass those values to `read_session_context` to retrieve a bounded window around the matching entry. When the anchor has multiple later branches, the read tool follows the most recently appended descendant path.
+
+Both tools are active by default. A `defaultTools` setting replaces the standard selection; include these names there to keep them enabled when customizing the tool set:
+
+```json
+{
+  "defaultTools": ["read", "bash", "edit", "write", "search_sessions", "read_session_context"]
+}
+```
 
 ## Session Commands
 
@@ -48,7 +64,7 @@ In the picker you can:
 - rename with Ctrl+R
 - delete with Ctrl+D, then confirm
 
-When available, pi uses the `trash` CLI for deletion instead of permanently removing files.
+Deleted sessions are moved to the database's internal trash table and removed from the active session list. Imported JSONL originals are not deleted.
 
 ## Naming Sessions
 
@@ -69,7 +85,7 @@ Named sessions are easier to find in `/resume` and `pi -r`.
 
 ## Branching with `/tree`
 
-Sessions are stored as trees. Every entry has an `id` and `parentId`, and the current position is the active leaf. `/tree` lets you jump to any previous point and continue from there without creating a new file.
+Sessions are stored as trees. Every entry has an `id` and `parentId`, and the current position is the active leaf. `/tree` lets you jump to any previous point and continue from there without creating a new session.
 
 <p align="center"><img src="images/tree-view.png" alt="Tree View" width="600"></p>
 
@@ -120,12 +136,12 @@ Selecting the root user message resets the leaf to an empty conversation and pla
 
 | Feature | `/tree` | `/fork` | `/clone` |
 |---------|---------|---------|----------|
-| Output | Same session file | New session file | New session file |
+| Output | Same database session | New database session | New database session |
 | View | Full tree | User-message selector | Current active branch |
 | Typical use | Explore alternatives in place | Start a new session from an earlier prompt | Duplicate current work before continuing |
 | Summary | Optional branch summary | None | None |
 
-Use `/tree` when you want to keep alternatives together. Use `/fork` or `/clone` when you want a separate session file.
+Use `/tree` when you want to keep alternatives together. Use `/fork` or `/clone` when you want a separate session.
 
 ## Branch Summaries
 
@@ -167,6 +183,6 @@ When pi exits because of an uncaught exception or a fatal runtime error, it stor
 
 ## Session Format
 
-Session files are JSONL and contain message entries, model changes, thinking-level changes, labels, compactions, branch summaries, and extension entries.
+The database stores entries in append order. JSONL is the portable import/export format and contains message entries, model changes, thinking-level changes, labels, compactions, branch summaries, and extension entries.
 
 For parsers, extensions, SDK usage, and the full SessionManager API, see [Session Format](session-format.md).

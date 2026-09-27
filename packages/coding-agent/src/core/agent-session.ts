@@ -232,7 +232,7 @@ export interface AgentSessionConfig {
 	modelRuntime: ModelRuntime;
 	/** Keeps the prompt cache entry of the last session request warm. */
 	cacheWarmer?: Pick<CacheWarmer, "cancel" | "status" | "onAgentSettled" | "onModeChanged" | "onWarmed">;
-	/** Initial active built-in tool names. Default: [read, bash, edit, write] */
+	/** Initial active built-in tool names. Default: [read, bash, edit, write, search_sessions, read_session_context] */
 	initialActiveToolNames?: string[];
 	/** Optional allowlist of tool names. When provided, only these tool names are exposed. */
 	allowedToolNames?: string[];
@@ -1381,7 +1381,7 @@ export class AgentSession {
 		return this.agent.followUpMode;
 	}
 
-	/** Current session file path, or undefined if sessions are disabled */
+	/** Current opaque session locator, or undefined if sessions are disabled */
 	get sessionFile(): string | undefined {
 		return this.sessionManager.getSessionFile();
 	}
@@ -3357,7 +3357,7 @@ export class AgentSession {
 
 		const defaultActiveToolNames = this._baseToolsOverride
 			? Object.keys(this._baseToolsOverride)
-			: ["read", "bash", "edit", "write"];
+			: ["read", "bash", "edit", "write", "search_sessions", "read_session_context"];
 		const baseActiveToolNames = options.activeToolNames ?? defaultActiveToolNames;
 		this._refreshToolRegistry({
 			activeToolNames: baseActiveToolNames,
@@ -3646,7 +3646,7 @@ export class AgentSession {
 
 	/**
 	 * Navigate to a different node in the session tree.
-	 * Unlike fork() which creates a new session file, this stays in the same file.
+	 * Unlike fork(), this keeps appending to the current database session.
 	 *
 	 * @param targetId The entry ID to navigate to
 	 * @param options.summarize Whether user wants to summarize abandoned branch

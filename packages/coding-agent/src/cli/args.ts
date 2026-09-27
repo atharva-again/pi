@@ -284,10 +284,10 @@ ${chalk.bold("Options:")}
   --print, -p                    Non-interactive mode: process prompt and exit
   --continue, -c                 Continue previous session
   --resume, -r                   Select a session to resume
-  --session <path|id>            Use specific session file or partial UUID
+  --session <path|id>            Use a session locator, legacy JSONL path, or partial ID
   --session-id <id>              Use exact project session ID, creating it if missing
-  --fork <path|id>               Fork specific session file or partial UUID into a new session
-  --session-dir <dir>            Directory for session storage and lookup
+  --fork <path|id>               Fork a session locator, JSONL session, or partial ID
+  --session-dir <dir>            Directory for the local session database
   --no-session                   Don't save session (ephemeral)
   --name, -n <name>              Set session display name
   --models <patterns>            Comma-separated model patterns for Ctrl+P cycling
@@ -380,8 +380,8 @@ ${chalk.bold("Examples:")}
   # Disable one tool while keeping the rest available
   ${APP_NAME} --exclude-tools ask_question
 
-  # Export a session file to HTML
-  ${APP_NAME} --export ~/${CONFIG_DIR_NAME}/agent/sessions/--path--/session.jsonl
+  # Export a legacy JSONL session to HTML
+  ${APP_NAME} --export legacy-session.jsonl
   ${APP_NAME} --export session.jsonl output.html
 
 ${chalk.bold("Environment Variables:")}

@@ -86,9 +86,9 @@ pi
 /login  # Then select provider
 ```
 
-Then just talk to pi. By default, pi gives the model four tools: `read`, `write`, `edit`, and `bash`. The model uses these to fulfill your requests. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [pi packages](#pi-packages).
+Then just talk to pi. By default, pi gives the model six tools: `read`, `bash`, `edit`, `write`, `search_sessions`, and `read_session_context`. The model uses these to fulfill your requests. Add capabilities via [skills](#skills), [prompt templates](#prompt-templates), [extensions](#extensions), or [pi packages](#pi-packages).
 
-**Platform notes:** [Windows](docs/windows.md) | [Termux (Android)](docs/termux.md) | [tmux](docs/tmux.md) | [Terminal setup](docs/terminal-setup.md) | [Shell aliases](docs/shell-aliases.md)
+**Platform notes:** [Windows](docs/windows.md) | [tmux](docs/tmux.md) | [Terminal setup](docs/terminal-setup.md) | [Shell aliases](docs/shell-aliases.md)
 
 ---
 
@@ -236,26 +236,26 @@ Configure delivery in [settings](docs/settings.md): `steeringMode` and `followUp
 
 ## Sessions
 
-Sessions are stored as JSONL files with a tree structure. Each entry has an `id` and `parentId`, enabling in-place branching without creating new files. See [docs/session-format.md](docs/session-format.md) for file format.
+Sessions are stored in one local embedded Turso database at `~/.pi/agent/sessions.db`; Pi does not connect to Turso Cloud. Entries retain a tree structure, and JSONL remains available for import and export. See [docs/session-format.md](docs/session-format.md) for details.
 
 ### Management
 
-Sessions auto-save to `~/.pi/agent/sessions/` organized by working directory.
+Sessions auto-save to `~/.pi/agent/sessions.db` across working directories; the session picker filters by project.
 
 ```bash
 pi -c                  # Continue most recent session
 pi -r                  # Browse and select from past sessions
 pi --no-session        # Ephemeral mode (don't save)
 pi --name "my task"    # Set session display name at startup
-pi --session <path|id> # Use specific session file or ID
-pi --fork <path|id>    # Fork specific session file or ID into a new session
+pi --session <path|id> # Use a session locator, legacy JSONL path, or ID
+pi --fork <path|id>    # Fork a session locator, JSONL session, or ID
 ```
 
 Use `/session` in interactive mode to see the current session ID before reusing it with `--session <id>` or `--fork <id>`.
 
 ### Branching
 
-**`/tree`** - Navigate the session tree in-place. Select any previous point, continue from there, and switch between branches. All history preserved in a single file. Selecting a point while the model is responding cancels that response. Navigation cannot proceed while compaction or another tree navigation is still running; wait for it to finish and retry.
+**`/tree`** - Navigate the session tree in-place. Select any previous point, continue from there, and switch between branches. All history stays in the same database session. Selecting a point while the model is responding cancels that response. Navigation cannot proceed while compaction or another tree navigation is still running; wait for it to finish and retry.
 
 <p align="center"><img src="docs/images/tree-view.png" alt="Tree View" width="600"></p>
 
@@ -264,11 +264,11 @@ Use `/session` in interactive mode to see the current session ID before reusing 
 - Press Ctrl+X to copy the selected message
 - Press Shift+L to label entries as bookmarks and Shift+T to toggle label timestamps
 
-**`/fork`** - Create a new session file from a previous user message on the active branch. Opens a selector, copies the active path up to that point, and places the selected prompt in the editor for modification.
+**`/fork`** - Create a new database session from a previous user message on the active branch. Opens a selector, copies the active path up to that point, and places the selected prompt in the editor for modification.
 
-**`/clone`** - Duplicate the current active branch into a new session file at the current position. The new session keeps the full active-path history and opens with an empty editor.
+**`/clone`** - Duplicate the current active branch into a new database session at the current position. The new session keeps the full active-path history and opens with an empty editor.
 
-**`--fork <path|id>`** - Fork an existing session file or partial session UUID directly from the CLI. This copies the full source session into a new session file in the current project.
+**`--fork <path|id>`** - Fork a session locator, legacy JSONL file, or partial session ID directly from the CLI. This copies the full source session into a new database session in the current project.
 
 ### Compaction
 
@@ -278,7 +278,7 @@ Long sessions can exhaust context windows. Compaction summarizes older messages 
 
 **Automatic:** Enabled by default. Triggers on context overflow (recovers and retries) or when approaching the limit (proactive). Configure via `/settings` or `settings.json`.
 
-Compaction is lossy. The full history remains in the JSONL file; use `/tree` to revisit. Customize compaction behavior via [extensions](#extensions). See [docs/compaction.md](docs/compaction.md) for internals.
+Compaction is lossy. The full history remains in the database; use `/tree` to revisit. Customize compaction behavior via [extensions](#extensions). See [docs/compaction.md](docs/compaction.md) for internals.
 
 Session model context is projected from append-only history. Extensions can append a `context_edit` to omit or replace an earlier message only for future model requests; raw history and usage remain unchanged:
 
@@ -606,9 +606,9 @@ cat README.md | pi -p "Summarize this text"
 |--------|-------------|
 | `-c`, `--continue` | Continue most recent session |
 | `-r`, `--resume` | Browse and select session |
-| `--session <path\|id>` | Use specific session file or partial UUID |
-| `--fork <path\|id>` | Fork specific session file or partial UUID into a new session |
-| `--session-dir <dir>` | Custom session storage directory |
+| `--session <path\|id>` | Use a session locator, legacy JSONL path, or partial ID |
+| `--fork <path\|id>` | Fork a session locator, legacy JSONL file, or partial ID |
+| `--session-dir <dir>` | Custom directory for the local session database |
 | `--no-session` | Ephemeral mode (don't save) |
 | `--name <name>`, `-n <name>` | Set session display name at startup |
 
@@ -724,7 +724,7 @@ Commands run by the LLM-callable `bash` and `powershell` tools also receive curr
 | Variable | Description |
 |----------|-------------|
 | `PI_SESSION_ID` | Current session ID |
-| `PI_SESSION_FILE` | Absolute session JSONL path; unset for ephemeral sessions |
+| `PI_SESSION_FILE` | Absolute local Turso database path; combine with `PI_SESSION_ID` to select a session |
 | `PI_PROVIDER` | Currently selected model provider |
 | `PI_MODEL` | Currently selected model ID |
 | `PI_REASONING_LEVEL` | Current effective reasoning level |

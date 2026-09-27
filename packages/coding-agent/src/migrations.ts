@@ -73,64 +73,6 @@ export function migrateAuthToAuthJson(): string[] {
 }
 
 /**
- * Migrate sessions from ~/.pi/agent/*.jsonl to proper session directories.
- *
- * Bug in v0.30.0: Sessions were saved to ~/.pi/agent/ instead of
- * ~/.pi/agent/sessions/<encoded-cwd>/. This migration moves them
- * to the correct location based on the cwd in their session header.
- *
- * See: https://github.com/earendil-works/pi-mono/issues/320
- */
-export function migrateSessionsFromAgentRoot(): void {
-	const agentDir = getAgentDir();
-
-	// Find all .jsonl files directly in agentDir (not in subdirectories)
-	let files: string[];
-	try {
-		files = readdirSync(agentDir)
-			.filter((f) => f.endsWith(".jsonl"))
-			.map((f) => join(agentDir, f));
-	} catch {
-		return;
-	}
-
-	if (files.length === 0) return;
-
-	for (const file of files) {
-		try {
-			// Read first line to get session header
-			const content = readFileSync(file, "utf8");
-			const firstLine = content.split("\n")[0];
-			if (!firstLine?.trim()) continue;
-
-			const header = JSON.parse(firstLine);
-			if (header.type !== "session" || !header.cwd) continue;
-
-			const cwd: string = header.cwd;
-
-			// Compute the correct session directory (same encoding as session-manager.ts)
-			const safePath = `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
-			const correctDir = join(agentDir, "sessions", safePath);
-
-			// Create directory if needed
-			if (!existsSync(correctDir)) {
-				mkdirSync(correctDir, { recursive: true });
-			}
-
-			// Move the file
-			const fileName = file.split("/").pop() || file.split("\\").pop();
-			const newPath = join(correctDir, fileName!);
-
-			if (existsSync(newPath)) continue; // Skip if target exists
-
-			renameSync(file, newPath);
-		} catch {
-			// Skip files that can't be migrated
-		}
-	}
-}
-
-/**
  * Migrate commands/ to prompts/ if needed.
  * Works for both regular directories and symlinks.
  */
@@ -307,7 +249,6 @@ export function runMigrations(cwd: string): {
 	deprecationWarnings: string[];
 } {
 	const migratedAuthProviders = migrateAuthToAuthJson();
-	migrateSessionsFromAgentRoot();
 	migrateToolsToBin();
 	migrateKeybindingsConfigFile();
 	const deprecationWarnings = migrateExtensionSystem(cwd);

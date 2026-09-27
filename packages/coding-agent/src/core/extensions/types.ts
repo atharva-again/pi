@@ -370,7 +370,7 @@ export interface ExtensionCommandContext extends ExtensionContext {
 		withSession?: (ctx: ReplacedSessionContext) => Promise<void>;
 	}): Promise<{ cancelled: boolean }>;
 
-	/** Fork from a specific entry, creating a new session file. */
+	/** Fork from a specific entry, creating a new database session. */
 	fork(
 		entryId: string,
 		options?: { position?: "before" | "at"; withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
@@ -382,7 +382,7 @@ export interface ExtensionCommandContext extends ExtensionContext {
 		options?: { summarize?: boolean; customInstructions?: string; replaceInstructions?: boolean; label?: string },
 	): Promise<{ cancelled: boolean }>;
 
-	/** Switch to a different session file. */
+	/** Switch to a session locator or legacy JSONL path. */
 	switchSession(
 		sessionPath: string,
 		options?: { withSession?: (ctx: ReplacedSessionContext) => Promise<void> },
@@ -569,7 +569,7 @@ export interface SessionStartEvent {
 	type: "session_start";
 	/** Why this session start happened. */
 	reason: "startup" | "reload" | "new" | "resume" | "fork";
-	/** Previously active session file. Present for "new", "resume", and "fork". */
+	/** Previously active session locator. Present for "new", "resume", and "fork". */
 	previousSessionFile?: string;
 }
 
@@ -584,6 +584,7 @@ export interface SessionInfoChangedEvent {
 export interface SessionBeforeSwitchEvent {
 	type: "session_before_switch";
 	reason: "new" | "resume";
+	/** Target session locator, or a legacy JSONL path before import. */
 	targetSessionFile?: string;
 }
 
@@ -637,7 +638,7 @@ export interface SessionCompactFailedEvent {
 export interface SessionShutdownEvent {
 	type: "session_shutdown";
 	reason: "quit" | "reload" | "new" | "resume" | "fork";
-	/** Destination session file when shutting down due to session replacement. */
+	/** Destination session locator when shutting down due to session replacement. */
 	targetSessionFile?: string;
 }
 

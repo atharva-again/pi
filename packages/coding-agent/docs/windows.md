@@ -16,7 +16,7 @@ Use `defaultTools` to replace the model-facing `bash` tool:
 
 ```json
 {
-  "defaultTools": ["read", "powershell", "edit", "write"]
+  "defaultTools": ["read", "powershell", "edit", "write", "search_sessions", "read_session_context"]
 }
 ```
 
@@ -24,7 +24,7 @@ Or enable both while comparing behavior:
 
 ```json
 {
-  "defaultTools": ["read", "bash", "powershell", "edit", "write"]
+  "defaultTools": ["read", "bash", "powershell", "edit", "write", "search_sessions", "read_session_context"]
 }
 ```
 

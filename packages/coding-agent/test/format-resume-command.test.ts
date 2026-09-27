@@ -1,9 +1,9 @@
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { APP_NAME } from "../src/config.ts";
-import type { SessionManager } from "../src/core/session-manager.ts";
+import { SessionManager } from "../src/core/session-manager.ts";
 import { formatResumeCommand } from "../src/modes/interactive/interactive-mode.ts";
 
 const tempDirs: string[] = [];
@@ -43,6 +43,7 @@ function createSessionManager(options: {
 	return {
 		isPersisted: () => options.persisted ?? true,
 		getSessionFile: () => options.sessionFile,
+		hasStoredSession: () => (options.persisted ?? true) && !!options.sessionFile && existsSync(options.sessionFile),
 		getSessionId: () => options.sessionId ?? "0197f6e4-4cf9-7f44-a2d8-f8f7f49ee9d3",
 		getSessionDir: () => options.sessionDir ?? "/tmp/pi-sessions",
 		usesDefaultSessionDir: () => options.usesDefaultSessionDir ?? true,
@@ -55,7 +56,7 @@ describe("formatResumeCommand", () => {
 		const sessionFile = createTempFile();
 		const sessionManager = createSessionManager({ sessionFile, sessionId: "test-session" });
 
-		expect(formatResumeCommand(sessionManager)).toBe(`${APP_NAME} --session test-session`);
+		expect(formatResumeCommand(sessionManager)).toBe(`${APP_NAME} --session ${sessionFile}`);
 	});
 
 	it("includes unquoted safe session dirs for non-default session dirs", () => {
@@ -69,7 +70,7 @@ describe("formatResumeCommand", () => {
 		});
 
 		expect(formatResumeCommand(sessionManager)).toBe(
-			`${APP_NAME} --session-dir /tmp/custom-pi-sessions --session test-session`,
+			`${APP_NAME} --session-dir /tmp/custom-pi-sessions --session ${sessionFile}`,
 		);
 	});
 
@@ -84,7 +85,7 @@ describe("formatResumeCommand", () => {
 		});
 
 		expect(formatResumeCommand(sessionManager)).toBe(
-			`${APP_NAME} --session-dir '/tmp/custom pi sessions' --session test-session`,
+			`${APP_NAME} --session-dir '/tmp/custom pi sessions' --session ${sessionFile}`,
 		);
 	});
 
@@ -99,8 +100,42 @@ describe("formatResumeCommand", () => {
 		});
 
 		expect(formatResumeCommand(sessionManager)).toBe(
-			`${APP_NAME} --session-dir '/tmp/custom pi'\\''s sessions' --session test-session`,
+			`${APP_NAME} --session-dir '/tmp/custom pi'\\''s sessions' --session ${sessionFile}`,
 		);
+	});
+
+	it("uses the locator database directory in the resume command", () => {
+		setStdoutIsTTY(true);
+		const storeDir = mkdtempSync(join(tmpdir(), "pi-resume-locator-store-"));
+		const otherDir = mkdtempSync(join(tmpdir(), "pi-resume-locator-other-"));
+		tempDirs.push(storeDir, otherDir);
+		const projectDir = join(storeDir, "project");
+		const session = SessionManager.create(projectDir, storeDir, { id: "locator-resume" });
+		session.appendMessage({ role: "user", content: "resume me", timestamp: Date.now() });
+		session.appendMessage({
+			role: "assistant",
+			content: [{ type: "text", text: "reply" }],
+			api: "test",
+			provider: "test",
+			model: "test",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		});
+
+		const reopened = SessionManager.open(session.getSessionFile()!, otherDir);
+
+		expect(formatResumeCommand(reopened)).toBe(
+			`${APP_NAME} --session-dir ${storeDir} --session ${session.getSessionFile()}`,
+		);
+		expect(reopened.getHeader()?.cwd).toBe(projectDir);
 	});
 
 	it("returns undefined when stdout is not a TTY", () => {

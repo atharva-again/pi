@@ -26,6 +26,7 @@
 				"proper-lockfile": "4.1.2",
 				"semver": "7.8.5",
 				"typebox": "1.3.27",
+				"@tursodatabase/database": "0.8.0-pre.12",
 				"undici": "8.10.2",
 				"yaml": "2.9.0"
 			},
@@ -1090,6 +1091,85 @@
 			"resolved": "https://registry.npmjs.org/@stablelib/base64/-/base64-1.0.1.tgz",
 			"integrity": "sha512-1bnPQqSxSuc3Ii6MhBysoWCg58j97aUjuCSZrGSmDxNqtytIi0k8utUenAwTZN4V5mXXYGsVUI9zeBqy+jBOSQ==",
 			"license": "MIT"
+		},
+		"node_modules/@tursodatabase/database": {
+			"version": "0.8.0-pre.12",
+			"resolved": "https://registry.npmjs.org/@tursodatabase/database/-/database-0.8.0-pre.12.tgz",
+			"integrity": "sha512-VxbbghAGLkvBTTyatJCMOE04w1MucNZh5oR2V1DxML+nQpH5yzFg4YcsvyxQUbqXOEpfaTDFIq8jNpyVDRz4cg==",
+			"license": "MIT",
+			"dependencies": {
+				"@tursodatabase/database-common": "^0.8.0-pre.12"
+			},
+			"optionalDependencies": {
+				"@tursodatabase/database-darwin-arm64": "0.8.0-pre.12",
+				"@tursodatabase/database-linux-arm64-gnu": "0.8.0-pre.12",
+				"@tursodatabase/database-linux-x64-gnu": "0.8.0-pre.12",
+				"@tursodatabase/database-win32-x64-msvc": "0.8.0-pre.12"
+			}
+		},
+		"node_modules/@tursodatabase/database-common": {
+			"version": "0.8.0-pre.12",
+			"resolved": "https://registry.npmjs.org/@tursodatabase/database-common/-/database-common-0.8.0-pre.12.tgz",
+			"integrity": "sha512-Z23PJOkd9SqqU12lwcdoN3LPYW5pVaob0TJv1lNYjbyBqBigVZDYFaCvceoawGK4u/Dvw4x5m7gLWBwfSwjrtg==",
+			"license": "MIT"
+		},
+		"node_modules/@tursodatabase/database-darwin-arm64": {
+			"version": "0.8.0-pre.12",
+			"resolved": "https://registry.npmjs.org/@tursodatabase/database-darwin-arm64/-/database-darwin-arm64-0.8.0-pre.12.tgz",
+			"integrity": "sha512-g7c/4PY14miGVJoN5EUVAACESdoGqQ4gbq0ktNHFnXtIl271NC504jDuBHulg9IYUqFY+A0FP09NwFBO381uwg==",
+			"license": "MIT",
+			"os": [
+				"darwin"
+			],
+			"cpu": [
+				"arm64"
+			],
+			"optional": true
+		},
+		"node_modules/@tursodatabase/database-linux-arm64-gnu": {
+			"version": "0.8.0-pre.12",
+			"resolved": "https://registry.npmjs.org/@tursodatabase/database-linux-arm64-gnu/-/database-linux-arm64-gnu-0.8.0-pre.12.tgz",
+			"integrity": "sha512-l1G1itPMKsd4hJnblE5nJyqxMa1h7lTic4P1sl1vmxIPtJdZ/92+5oc/fAXSl2Z8HSepAz/tmXYgyYnn5D6Fhw==",
+			"license": "MIT",
+			"os": [
+				"linux"
+			],
+			"cpu": [
+				"arm64"
+			],
+			"libc": [
+				"glibc"
+			],
+			"optional": true
+		},
+		"node_modules/@tursodatabase/database-linux-x64-gnu": {
+			"version": "0.8.0-pre.12",
+			"resolved": "https://registry.npmjs.org/@tursodatabase/database-linux-x64-gnu/-/database-linux-x64-gnu-0.8.0-pre.12.tgz",
+			"integrity": "sha512-8K7x1h88BxuA4PhXpzobrPKS6T28RZLeNZpxvEcuIUNh+iqv5DfDZCgaBgZrlPuS8gxZomRSBp5pmZo+pWkvHA==",
+			"license": "MIT",
+			"os": [
+				"linux"
+			],
+			"cpu": [
+				"x64"
+			],
+			"libc": [
+				"glibc"
+			],
+			"optional": true
+		},
+		"node_modules/@tursodatabase/database-win32-x64-msvc": {
+			"version": "0.8.0-pre.12",
+			"resolved": "https://registry.npmjs.org/@tursodatabase/database-win32-x64-msvc/-/database-win32-x64-msvc-0.8.0-pre.12.tgz",
+			"integrity": "sha512-lxwTtLazzZ3I6Cqi/gY3FkOzvc/mn2pOJ1L/JAOCOiTUq0q7zewXOz+VXQiWh80kwZ21uVnLc3pn5Kl4IaiuVQ==",
+			"license": "MIT",
+			"os": [
+				"win32"
+			],
+			"cpu": [
+				"x64"
+			],
+			"optional": true
 		},
 		"node_modules/@types/node": {
 			"version": "22.19.19",

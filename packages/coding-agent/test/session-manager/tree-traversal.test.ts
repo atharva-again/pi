@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, rmSync } from "fs";
+import { mkdirSync, rmSync } from "fs";
 import { tmpdir } from "os";
 import { join } from "path";
 import { describe, expect, it } from "vitest";
@@ -496,9 +496,8 @@ describe("createBranchedSession", () => {
 			const newFile = session.createBranchedSession(id1);
 			expect(newFile).toBeDefined();
 
-			// The branched path has no assistant, so the file should not exist yet
-			// (deferred to _persist on first assistant, matching newSession() contract)
-			expect(existsSync(newFile!)).toBe(false);
+			// The branched path has no assistant, so it should not be stored yet.
+			expect(session.hasStoredSession()).toBe(false);
 
 			// Simulate extension adding entry before assistant (like preset on turn_start)
 			session.appendCustomEntry("preset-state", { name: "plan" });
@@ -506,25 +505,18 @@ describe("createBranchedSession", () => {
 			// Now the assistant responds
 			session.appendMessage(assistantMsg("new answer"));
 
-			// File should now exist with exactly one header and no duplicate IDs
-			expect(existsSync(newFile!)).toBe(true);
-			const content = readFileSync(newFile!, "utf-8");
-			const lines = content.trim().split("\n").filter(Boolean);
-			const records = lines.map((line) => JSON.parse(line));
+			// The first assistant response flushes the complete session to Turso.
+			expect(session.hasStoredSession()).toBe(true);
+			const records = SessionManager.open(newFile!, tempDir).getEntries();
 
-			expect(records.filter((r) => r.type === "session")).toHaveLength(1);
-
-			const entryIds = records
-				.filter((r) => r.type !== "session")
-				.map((r) => r.id)
-				.filter((id): id is string => typeof id === "string");
+			const entryIds = records.map((entry) => entry.id);
 			expect(new Set(entryIds).size).toBe(entryIds.length);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 
-	it("preserves tool and summary usage across a file-backed reload", () => {
+	it("preserves tool and summary usage across a database-backed reload", () => {
 		const tempDir = join(tmpdir(), `session-usage-roundtrip-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
 
@@ -570,7 +562,7 @@ describe("createBranchedSession", () => {
 		}
 	});
 
-	it("writes file immediately when forking from a point with assistant messages", () => {
+	it("writes a branched session immediately when it includes an assistant message", () => {
 		const tempDir = join(tmpdir(), `session-fork-with-assistant-${Date.now()}`);
 		mkdirSync(tempDir, { recursive: true });
 
@@ -585,12 +577,10 @@ describe("createBranchedSession", () => {
 			const newFile = session.createBranchedSession(id2);
 			expect(newFile).toBeDefined();
 
-			// Path includes an assistant, so file should be written immediately
-			expect(existsSync(newFile!)).toBe(true);
-			const content = readFileSync(newFile!, "utf-8");
-			const lines = content.trim().split("\n").filter(Boolean);
-			const records = lines.map((line) => JSON.parse(line));
-			expect(records.filter((r) => r.type === "session")).toHaveLength(1);
+			// Path includes an assistant, so the database row is written immediately.
+			const reopened = SessionManager.open(newFile!, tempDir);
+			expect(reopened.hasStoredSession()).toBe(true);
+			expect(reopened.getEntries()).toHaveLength(2);
 		} finally {
 			rmSync(tempDir, { recursive: true, force: true });
 		}

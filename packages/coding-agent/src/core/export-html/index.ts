@@ -1,12 +1,12 @@
+import { createHash } from "node:crypto";
 import type { AgentState } from "@earendil-works/pi-agent-core";
 import { existsSync, readFileSync, writeFileSync } from "fs";
-import { basename, join } from "path";
+import { join } from "path";
 import { APP_NAME, getExportTemplateDir } from "../../config.ts";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/interactive/theme/theme.ts";
 import { normalizePath, resolvePath } from "../../utils/paths.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
-import type { SessionEntry } from "../session-manager.ts";
-import { SessionManager } from "../session-manager.ts";
+import { assertValidSessionId, isSessionLocatorPath, type SessionEntry, SessionManager } from "../session-manager.ts";
 
 /**
  * Interface for rendering custom tools to HTML.
@@ -37,6 +37,15 @@ export interface ExportOptions {
 	themeName?: string;
 	/** Optional tool renderer for custom tools */
 	toolRenderer?: ToolHtmlRenderer;
+}
+
+function getDefaultExportFilename(sessionManager: SessionManager): string {
+	const sessionId = sessionManager.getSessionId();
+	assertValidSessionId(sessionId);
+	const sessionLocator = sessionManager.getSessionFile();
+	if (!sessionLocator) throw new Error("Cannot export an in-memory session to HTML");
+	const disambiguator = createHash("sha256").update(sessionLocator).digest("hex").slice(0, 12);
+	return `${APP_NAME}-session-${sessionId}-${disambiguator}.html`;
 }
 
 /** Parse a color string to RGB values. Supports hex (#RRGGBB) and rgb(r,g,b) formats. */
@@ -242,9 +251,9 @@ export async function exportSessionToHtml(
 
 	const sessionFile = sm.getSessionFile();
 	if (!sessionFile) {
-		throw new Error("Cannot export in-memory session to HTML");
+		throw new Error("Cannot export an in-memory session to HTML");
 	}
-	if (!existsSync(sessionFile)) {
+	if (!sm.hasStoredSession()) {
 		throw new Error("Nothing to export yet - start a conversation first");
 	}
 
@@ -273,8 +282,7 @@ export async function exportSessionToHtml(
 
 	let outputPath = opts.outputPath ? normalizePath(opts.outputPath) : undefined;
 	if (!outputPath) {
-		const sessionBasename = basename(sessionFile, ".jsonl");
-		outputPath = `${APP_NAME}-session-${sessionBasename}.html`;
+		outputPath = getDefaultExportFilename(sm);
 	}
 
 	writeFileSync(outputPath, html, "utf8");
@@ -282,14 +290,14 @@ export async function exportSessionToHtml(
 }
 
 /**
- * Export session file to HTML (standalone, without AgentState).
- * Used by CLI for exporting arbitrary session files.
+ * Export a session locator or legacy JSONL file to HTML (standalone, without AgentState).
+ * Used by CLI for exporting arbitrary sessions.
  */
 export async function exportFromFile(inputPath: string, options?: ExportOptions | string): Promise<string> {
 	const opts: ExportOptions = typeof options === "string" ? { outputPath: options } : options || {};
-	const resolvedInputPath = resolvePath(inputPath);
+	const resolvedInputPath = isSessionLocatorPath(inputPath) ? inputPath : resolvePath(inputPath);
 
-	if (!existsSync(resolvedInputPath)) {
+	if (!isSessionLocatorPath(resolvedInputPath) && !existsSync(resolvedInputPath)) {
 		throw new Error(`File not found: ${resolvedInputPath}`);
 	}
 
@@ -307,8 +315,7 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 
 	let outputPath = opts.outputPath ? normalizePath(opts.outputPath) : undefined;
 	if (!outputPath) {
-		const inputBasename = basename(resolvedInputPath, ".jsonl");
-		outputPath = `${APP_NAME}-session-${inputBasename}.html`;
+		outputPath = getDefaultExportFilename(sm);
 	}
 
 	writeFileSync(outputPath, html, "utf8");

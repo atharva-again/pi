@@ -372,7 +372,7 @@ export class RpcClient {
 	}
 
 	/**
-	 * Switch to a different session file.
+	 * Switch to a session locator or legacy JSONL path.
 	 * @returns Object with `cancelled: true` if an extension cancelled the switch
 	 */
 	async switchSession(sessionPath: string): Promise<{ cancelled: boolean }> {

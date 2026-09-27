@@ -24,7 +24,7 @@ Commands run by the `bash` and `powershell` tools receive the current Pi session
 | Variable | Description |
 |----------|-------------|
 | `PI_SESSION_ID` | Current session ID |
-| `PI_SESSION_FILE` | Absolute path to the current session JSONL file; unset for ephemeral sessions |
+| `PI_SESSION_FILE` | Absolute path to the local Turso database file; unset for ephemeral sessions. Combine with `PI_SESSION_ID` to select the current session. |
 | `PI_PROVIDER` | Currently selected model provider |
 | `PI_MODEL` | Currently selected model ID |
 | `PI_REASONING_LEVEL` | Current effective reasoning level: `off`, `minimal`, `low`, `medium`, `high`, `xhigh`, or `max` |
@@ -38,13 +38,7 @@ printf '%s/%s\n' "$PI_PROVIDER" "$PI_MODEL"
 printf 'reasoning=%s session=%s\n' "$PI_REASONING_LEVEL" "$PI_SESSION_ID"
 ```
 
-The session file can be inspected directly when the session is persistent:
-
-```bash
-if [ -n "$PI_SESSION_FILE" ]; then
-  tail -n 1 "$PI_SESSION_FILE"
-fi
-```
+Session entries are stored as JSON in the local Turso database. Its full-text index uses a Turso-specific SQLite extension, so the database cannot be opened with Node's built-in `node:sqlite`. For programmatic inspection, use `@tursodatabase/database/compat` with the `index_method` experimental feature, and select entries by `PI_SESSION_ID` and the session's working directory. The database schema is an internal implementation detail and may change.
 
 These variables are injected into the LLM-callable `bash` and `powershell` tools. They are not injected into user-entered `!` or `!!` commands.
 
@@ -79,7 +73,7 @@ These variables are read by Pi itself:
 | Variable | Description |
 |----------|-------------|
 | `PI_CODING_AGENT_DIR` | Override the config directory; default is `~/.pi/agent` |
-| `PI_CODING_AGENT_SESSION_DIR` | Override session storage; overridden by `--session-dir` |
+| `PI_CODING_AGENT_SESSION_DIR` | Directory for the local session database; overridden by `--session-dir` |
 | `PI_PACKAGE_DIR` | Override the package directory, useful for Nix/Guix store paths |
 | `PI_OFFLINE` | Disable startup network operations, including update checks, package updates, and install/update telemetry |
 | `PI_SKIP_VERSION_CHECK` | Disable the `pi.dev` latest-version request |

@@ -284,7 +284,7 @@ Windows paths in JSON must use forward slashes or escaped backslashes:
 |---------|------|---------|-------------|
 | `defaultTools` | string[] | - | Built-in tools enabled initially. When omitted, Pi uses its standard defaults |
 
-`defaultTools` selects the built-in tools enabled at startup. Extension and SDK custom tools remain enabled. Available built-ins are `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, and `ls`:
+`defaultTools` selects the built-in tools enabled at startup. Extension and SDK custom tools remain enabled. The standard defaults are `read`, `bash`, `edit`, `write`, `search_sessions`, and `read_session_context`. Available built-ins are `read`, `bash`, `powershell`, `edit`, `write`, `grep`, `find`, `ls`, `search_sessions`, and `read_session_context`:
 
 ```json
 {
@@ -296,7 +296,7 @@ On Windows, select `powershell` instead of `bash`, or include both:
 
 ```json
 {
-  "defaultTools": ["read", "powershell", "edit", "write"]
+  "defaultTools": ["read", "powershell", "edit", "write", "search_sessions", "read_session_context"]
 }
 ```
 
@@ -306,7 +306,7 @@ An empty array starts with no built-in tools while preserving extension and SDK 
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
-| `sessionDir` | string | - | Directory where session files are stored. Accepts absolute or relative paths, plus `~`. |
+| `sessionDir` | string | - | Directory where the local session database (`sessions.db`) is stored. Accepts absolute or relative paths, plus `~`. |
 
 ```json
 { "sessionDir": ".pi/sessions" }

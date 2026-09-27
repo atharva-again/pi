@@ -1,6 +1,6 @@
 import { existsSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { SessionManager } from "../../src/core/session-manager.ts";
 
@@ -77,9 +77,48 @@ describe("SessionManager.newSession with custom id", () => {
 		expect(session.getSessionId()).toBe("created-session-id");
 		expect(session.getHeader()!.id).toBe("created-session-id");
 		const sessionFile = session.getSessionFile()!;
-		expect(sessionFile).toContain("created-session-id");
-		expect(basename(sessionFile)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z_created-session-id\.jsonl$/);
+		expect(sessionFile).toMatch(/^pi-session:\/\//);
 		expect(existsSync(sessionFile)).toBe(false);
+	});
+
+	it("rejects a persisted custom id used by an unimported legacy archive", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-manager-"));
+		const cwd = join(tempDir, "project");
+		const archivePath = join(tempDir, "legacy.jsonl");
+		const id = "legacy-existing-id";
+		writeFileSync(
+			archivePath,
+			`${JSON.stringify({
+				type: "session",
+				version: 3,
+				id,
+				timestamp: new Date().toISOString(),
+				cwd,
+			})}\n`,
+		);
+
+		expect(() => SessionManager.create(cwd, tempDir, { id })).toThrow(
+			`Session id already exists: ${id} (legacy archive: ${archivePath})`,
+		);
+	});
+
+	it("allows a persisted custom id used by an archive from another project", () => {
+		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-manager-"));
+		const archivedCwd = join(tempDir, "archived-project");
+		const cwd = join(tempDir, "new-project");
+		const id = "project-scoped-id";
+		writeFileSync(
+			join(tempDir, "legacy.jsonl"),
+			`${JSON.stringify({
+				type: "session",
+				version: 3,
+				id,
+				timestamp: new Date().toISOString(),
+				cwd: archivedCwd,
+			})}\n`,
+		);
+
+		expect(SessionManager.create(cwd, tempDir, { id }).getSessionId()).toBe(id);
 	});
 
 	it("generates a UUIDv7 id when creating a branched session", () => {
@@ -96,7 +135,7 @@ describe("SessionManager.newSession with custom id", () => {
 		expect(session.getHeader()!.id).toBe(session.getSessionId());
 	});
 
-	it("generates a UUIDv7 id when forking from another session file", () => {
+	it("generates a UUIDv7 id when forking from another session file", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-manager-"));
 		const sourcePath = join(tempDir, "source.jsonl");
 		writeFileSync(
@@ -136,14 +175,14 @@ describe("SessionManager.newSession with custom id", () => {
 `,
 		);
 
-		const forked = SessionManager.forkFrom(sourcePath, tempDir, tempDir);
+		const forked = await SessionManager.forkFrom(sourcePath, tempDir, tempDir);
 		const header = forked.getHeader();
 		expect(header).not.toBeNull();
 		expect(header!.id).toMatch(UUID_V7_RE);
 		expect(header!.parentSession).toBe(sourcePath);
 	});
 
-	it("uses the provided id when forking from another session file", () => {
+	it("uses the provided id when forking from another session file", async () => {
 		const tempDir = mkdtempSync(join(tmpdir(), "pi-session-manager-"));
 		const sourcePath = join(tempDir, "source.jsonl");
 		writeFileSync(
@@ -157,13 +196,13 @@ describe("SessionManager.newSession with custom id", () => {
 			})}\n`,
 		);
 
-		const forked = SessionManager.forkFrom(sourcePath, tempDir, tempDir, { id: "forked-session-id" });
+		const forked = await SessionManager.forkFrom(sourcePath, tempDir, tempDir, { id: "forked-session-id" });
 		const header = forked.getHeader();
 		expect(header).not.toBeNull();
 		expect(header!.id).toBe("forked-session-id");
 		expect(header!.parentSession).toBe(sourcePath);
 		const sessionFile = forked.getSessionFile()!;
-		expect(sessionFile).toContain("forked-session-id");
-		expect(basename(sessionFile)).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}-\d{3}Z_forked-session-id\.jsonl$/);
+		expect(sessionFile).toMatch(/^pi-session:\/\//);
+		expect(SessionManager.open(sessionFile).getSessionId()).toBe("forked-session-id");
 	});
 });

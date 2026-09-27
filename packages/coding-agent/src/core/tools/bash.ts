@@ -14,6 +14,7 @@ import {
 	untrackDetachedChildPid,
 } from "../../utils/shell.ts";
 import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
+import { getSessionDatabasePathFromLocator } from "../session-manager.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import { BASH_UPDATE_THROTTLE_MS, createShellRenderers } from "./renderers/bash.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
@@ -183,7 +184,7 @@ function resolveSpawnContext(
 	if (exposeSessionEnvironment && ctx) {
 		const model = ctx.model;
 		env.PI_SESSION_ID = ctx.sessionManager.getSessionId();
-		const sessionFile = ctx.sessionManager.getSessionFile();
+		const sessionFile = getSessionDatabasePathFromLocator(ctx.sessionManager.getSessionFile() ?? "");
 		if (sessionFile) env.PI_SESSION_FILE = sessionFile;
 		if (model) {
 			env.PI_PROVIDER = model.provider;

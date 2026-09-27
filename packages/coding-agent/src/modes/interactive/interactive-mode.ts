@@ -351,13 +351,13 @@ export function formatResumeCommand(sessionManager: SessionManager): string | un
 	if (!sessionManager.isPersisted()) return undefined;
 
 	const sessionFile = sessionManager.getSessionFile();
-	if (!sessionFile || !fs.existsSync(sessionFile)) return undefined;
+	if (!sessionFile || !sessionManager.hasStoredSession()) return undefined;
 
 	const args = [APP_NAME];
 	if (!sessionManager.usesDefaultSessionDir()) {
 		args.push("--session-dir", quoteIfNeeded(sessionManager.getSessionDir()));
 	}
-	args.push("--session", sessionManager.getSessionId());
+	args.push("--session", quoteIfNeeded(sessionFile));
 	return args.join(" ");
 }
 
@@ -6511,7 +6511,7 @@ export class InteractiveMode {
 		if (sessionName) {
 			info += `${theme.fg("dim", "Name:")} ${sessionName}\n`;
 		}
-		info += `${theme.fg("dim", "File:")} ${stats.sessionFile ?? "In-memory"}\n`;
+		info += `${theme.fg("dim", "Database:")} ${this.sessionManager.getSessionDatabasePath() ?? "In-memory"}\n`;
 		info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n\n`;
 		info += `${theme.bold("Messages")}\n`;
 		info += `${theme.fg("dim", "Total:")} ${stats.totalMessages}\n`;
