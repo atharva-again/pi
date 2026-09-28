@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `/refresh` to reload the current topic's session from disk.
 - Added Telegram image input and native media attachment delivery for explicit `MEDIA:` paths, with Telegram-specific delivery instructions for spawned Pi runtimes.
 
 ### Changed

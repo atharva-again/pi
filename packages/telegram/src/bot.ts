@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { accessSync, constants, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { accessSync, constants, existsSync, lstatSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
@@ -158,6 +158,7 @@ export const PI_BUILTIN_SLASH_COMMANDS: ReadonlyArray<PiBuiltinCommand> = [
 	{ name: "new", description: "Start a new session" },
 	{ name: "compact", description: "Manually compact the session context" },
 	{ name: "resume", description: "Resume a different session" },
+	{ name: "refresh", description: "Reload the current session from disk" },
 	{ name: "reload", description: "Reload keybindings, extensions, skills, prompts, themes, and context files" },
 	{ name: "quit", description: "Quit pi" },
 ];
@@ -1151,6 +1152,9 @@ export class TelegramPiBot {
 				return;
 			case "resume":
 				await this.handleResume(conversation, args);
+				return;
+			case "refresh":
+				await this.handleRefresh(conversation);
 				return;
 			case "reload":
 				await this.confirmReload(conversation);
@@ -2769,6 +2773,43 @@ export class TelegramPiBot {
 				: `Error: ${redactToken(responseError(response))}`,
 			true,
 		);
+	}
+
+	private async handleRefresh(conversation: ConversationRef): Promise<void> {
+		try {
+			const state = await this.manager.getState(conversation);
+			if (state?.isStreaming || state?.isCompacting) {
+				await this.sendText(
+					conversation,
+					"Pi is busy. Wait for the current response or compaction to finish, then refresh.",
+					true,
+				);
+				return;
+			}
+			if (!state) {
+				await this.sendText(conversation, "Error: Could not check the current session status.", true);
+				return;
+			}
+			if (!state.sessionFile || !existsSync(state.sessionFile)) {
+				await this.sendText(conversation, "No saved session file to refresh.", true);
+				return;
+			}
+
+			const response = await this.manager.restoreSession(conversation, state.sessionFile);
+			if (!isCommandResponse(response, "switch_session")) {
+				await this.sendText(conversation, `Error: ${redactToken(responseError(response))}`, true);
+				return;
+			}
+			if (response.data.cancelled) {
+				await this.sendText(conversation, "Refresh cancelled.", true);
+				return;
+			}
+
+			await this.refreshChatCommandMenu(conversation, true);
+			await this.sendText(conversation, "Refreshed session from disk.", true);
+		} catch (error) {
+			await this.sendText(conversation, `Error: ${redactToken(formatError(error))}`, true);
+		}
 	}
 
 	private async handleUiRequest(conversation: ConversationRef, request: RpcExtensionUIRequest): Promise<void> {

@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `/refresh` to reload the current session from disk after another client changes it.
 - Added `Ctrl+P` pin toggling in `/resume`, with pinned sessions stored separately and shown above other sessions.
 
 ### Fixed

@@ -3239,6 +3239,11 @@ export class InteractiveMode {
 				await this.handleReloadCommand();
 				return;
 			}
+			if (text === "/refresh") {
+				this.editor.setText("");
+				await this.handleRefreshCommand();
+				return;
+			}
 			if (text === "/debug") {
 				this.handleDebugCommand();
 				this.editor.setText("");
@@ -5659,6 +5664,7 @@ export class InteractiveMode {
 	private async handleResumeSession(
 		sessionPath: string,
 		options?: Parameters<ExtensionCommandContext["switchSession"]>[1],
+		successStatus = "Resumed session",
 	): Promise<{ cancelled: boolean }> {
 		this.clearStatusIndicator();
 		try {
@@ -5669,7 +5675,7 @@ export class InteractiveMode {
 			if (result.cancelled) {
 				return result;
 			}
-			this.showStatus("Resumed session");
+			this.showStatus(successStatus);
 			return result;
 		} catch (error: unknown) {
 			if (error instanceof MissingSessionCwdError) {
@@ -5686,11 +5692,34 @@ export class InteractiveMode {
 				if (result.cancelled) {
 					return result;
 				}
-				this.showStatus("Resumed session in current cwd");
+				this.showStatus(`${successStatus} in current cwd`);
 				return result;
 			}
 			return this.handleFatalRuntimeError("Failed to resume session", error);
 		}
+	}
+
+	private async handleRefreshCommand(): Promise<void> {
+		if (this.session.isStreaming) {
+			this.showWarning("Wait for the current response to finish before refreshing the session.");
+			return;
+		}
+		if (this.session.isBashRunning) {
+			this.showWarning("Wait for the current bash command to finish before refreshing the session.");
+			return;
+		}
+		if (this.session.isCompacting) {
+			this.showWarning("Wait for compaction to finish before refreshing the session.");
+			return;
+		}
+
+		const sessionFile = this.sessionManager.getSessionFile();
+		if (!this.sessionManager.isPersisted() || !sessionFile || !fs.existsSync(sessionFile)) {
+			this.showWarning("No saved session file to refresh.");
+			return;
+		}
+
+		await this.handleResumeSession(sessionFile, undefined, "Refreshed session from disk");
 	}
 
 	private getLoginProviderOptions(authType?: "oauth" | "api_key"): AuthSelectorProvider[] {

@@ -75,6 +75,7 @@ Pi commands:
 - `/new` - confirmation flow for a new session
 - `/compact` - compact now or prompt for custom instructions
 - `/resume` - recent-session picker or `/resume <id-or-path>`
+- `/refresh` - reload the current topic's session from disk
 - `/reload` - reload keybindings, extensions, skills, prompts, and themes
 - `/quit` - private-chat confirmation to stop `pi-tg`
 

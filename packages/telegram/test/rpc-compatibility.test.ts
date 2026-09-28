@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { RpcCommand, RpcResponse } from "@earendil-works/pi-coding-agent";
+import { type RpcCommand, type RpcResponse, SessionManager } from "@earendil-works/pi-coding-agent";
 import { afterEach, describe, expect, it } from "vitest";
 import { createRpcProcessInstance, type RpcProcessInstance } from "../src/rpc-process.ts";
 
@@ -84,6 +84,24 @@ describe("Telegram coding-agent RPC compatibility", () => {
 			});
 			expectSuccess(imported, "import_jsonl");
 			expect(imported.data.cancelled).toBe(false);
+
+			const stateBeforeRefresh = await sendWithTimeout(rpc, { type: "get_state" });
+			expectSuccess(stateBeforeRefresh, "get_state");
+			const sessionFile = stateBeforeRefresh.data.sessionFile;
+			expect(sessionFile).toBeDefined();
+			if (!sessionFile) throw new Error("Expected a saved session file after import");
+			SessionManager.open(sessionFile).appendMessage({
+				role: "user",
+				content: "External refresh marker",
+				timestamp: Date.now(),
+			});
+
+			const refreshed = await sendWithTimeout(rpc, { type: "switch_session", sessionPath: sessionFile });
+			expectSuccess(refreshed, "switch_session");
+			expect(refreshed.data.cancelled).toBe(false);
+			const messages = await sendWithTimeout(rpc, { type: "get_messages" });
+			expectSuccess(messages, "get_messages");
+			expect(JSON.stringify(messages.data.messages)).toContain("External refresh marker");
 
 			const tree = await sendWithTimeout(rpc, { type: "get_tree" });
 			expectSuccess(tree, "get_tree");
