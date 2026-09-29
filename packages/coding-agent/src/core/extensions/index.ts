@@ -90,6 +90,7 @@ export type {
 	ExtensionShortcut,
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
+	ExtensionVirtualModel,
 	ExtensionWidgetOptions,
 	FindToolCallEvent,
 	FindToolResultEvent,
@@ -130,6 +131,7 @@ export type {
 	// Provider Registration
 	ProviderConfig,
 	ProviderModelConfig,
+	ProviderStreamEvent,
 	ReadToolCallEvent,
 	ReadToolResultEvent,
 	// Commands

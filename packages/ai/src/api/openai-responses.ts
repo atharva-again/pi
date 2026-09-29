@@ -92,7 +92,7 @@ function getPromptCacheRetention(
 function getPromptCacheOptions(
 	compat: Required<OpenAIResponsesCompat>,
 	cacheRetention: CacheRetention,
-): { mode?: "explicit"; ttl?: "30m" } | undefined {
+): ResponseCreateParamsStreaming["prompt_cache_options"] {
 	if (!compat.supportsExplicitPromptCacheMode) return undefined;
 	if (cacheRetention === "none") return { mode: "explicit" };
 	if (cacheRetention === "long" && compat.supportsLongCacheRetention) return { ttl: "30m" };
@@ -178,6 +178,7 @@ export const stream: StreamFunction<"openai-responses", OpenAIResponsesOptions> 
 			stream.push({ type: "start", partial: output });
 
 			await processResponsesStream(openaiStream, output, stream, model, {
+				onProviderStreamEvent: options?.onProviderStreamEvent,
 				serviceTier: options?.serviceTier,
 				grammarToolInputProperties,
 				applyServiceTierPricing: (usage, serviceTier) => applyServiceTierPricing(usage, serviceTier, model),
@@ -306,9 +307,7 @@ function buildParams(
 	});
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
-	const params: ResponseCreateParamsStreaming & {
-		prompt_cache_options?: { mode?: "explicit"; ttl?: "30m" };
-	} = {
+	const params: ResponseCreateParamsStreaming = {
 		model: model.id,
 		input: messages,
 		stream: true,
@@ -359,10 +358,8 @@ function buildParams(
 		if (model.provider === "xai") params.include = ["reasoning.encrypted_content"];
 	}
 
-	// Last so custom keys override the named request fields.
-	if (options?.samplingParams) {
-		Object.assign(params, options.samplingParams);
-	}
+	// Last so custom keys override the named request fields. Per-request keys override model defaults.
+	Object.assign(params, model.samplingParams, options?.samplingParams);
 
 	return params;
 }
@@ -375,6 +372,7 @@ function getServiceTierCostMultiplier(
 		case "flex":
 			return 0.5;
 		case "priority":
+		case "fast":
 			return model.id === "gpt-5.5" ? 2.5 : 2;
 		default:
 			return 1;

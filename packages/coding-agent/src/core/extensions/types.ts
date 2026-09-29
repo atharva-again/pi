@@ -16,17 +16,23 @@ import type {
 	ToolExecutionMode,
 } from "@earendil-works/pi-agent-core";
 import type {
+	AnyModel,
 	Api,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
+	ClassifierApi,
 	ConstrainedSamplingConfig,
+	ImageApi,
 	ImageContent,
 	Message,
 	Model,
 	OAuthCredentials,
 	OAuthLoginCallbacks,
 	Provider,
+	ProviderClassifier,
 	ProviderHeaders,
+	ProviderId,
+	ProviderImages,
 	RefreshModelsContext,
 	SimpleStreamOptions,
 	TextContent,
@@ -88,6 +94,7 @@ import type {
 	ReadToolInput,
 	WriteToolInput,
 } from "../tools/index.ts";
+import type { ModelRoute, ModelRouteRequest, VirtualModelDefinition } from "../virtual-models.ts";
 
 export type { ExecOptions, ExecResult } from "../exec.ts";
 export type { BuildSystemPromptOptions, NormalizedBuildSystemPromptOptions } from "../system-prompt.ts";
@@ -733,6 +740,15 @@ export interface AfterProviderResponseEvent {
 	headers: Record<string, string>;
 }
 
+/** Fired for a parsed provider stream event before Pi normalizes it. */
+export interface ProviderStreamEvent {
+	type: "provider_stream_event";
+	provider: ProviderId;
+	api: Api;
+	model: string;
+	data: unknown;
+}
+
 /** Fired after user submits prompt but before agent loop. */
 export interface BeforeAgentStartEvent {
 	type: "before_agent_start";
@@ -1177,6 +1193,7 @@ export type ExtensionEvent =
 	| BeforeProviderRequestEvent
 	| BeforeProviderHeadersEvent
 	| AfterProviderResponseEvent
+	| ProviderStreamEvent
 	| BeforeAgentStartEvent
 	| AgentStartEvent
 	| AgentEndEvent
@@ -1390,6 +1407,7 @@ export interface ExtensionAPI {
 	): () => void;
 	on(event: "before_provider_headers", handler: ExtensionHandler<BeforeProviderHeadersEvent>): () => void;
 	on(event: "after_provider_response", handler: ExtensionHandler<AfterProviderResponseEvent>): () => void;
+	on(event: "provider_stream_event", handler: ExtensionHandler<ProviderStreamEvent>): () => void;
 	on(
 		event: "before_agent_start",
 		handler: ExtensionHandler<BeforeAgentStartEvent, BeforeAgentStartEventResult>,
@@ -1619,6 +1637,20 @@ export interface ExtensionAPI {
 	 */
 	unregisterProvider(name: string): void;
 
+	/**
+	 * Register a virtual model: a selectable catalog entry that routes each request to a physical
+	 * model. The selection (`ctx.model`, `model_change` entries) names the virtual model; assistant
+	 * messages record the physical model and thinking level the router picked.
+	 *
+	 * `provider` may be any provider id, including one with physical models, and may list several
+	 * virtual models. Registering the same provider and id again replaces the virtual model. See
+	 * docs/virtual-models.md.
+	 */
+	registerVirtualModel<TState = unknown>(model: ExtensionVirtualModel<TState>): void;
+
+	/** Remove a virtual model registered with `registerVirtualModel()`. */
+	unregisterVirtualModel(provider: string, id: string): void;
+
 	/** Shared event bus for extension communication. */
 	events: EventBus;
 }
@@ -1626,6 +1658,12 @@ export interface ExtensionAPI {
 // ============================================================================
 // Provider Registration Types
 // ============================================================================
+
+/** Virtual model registered via pi.registerVirtualModel(). */
+export interface ExtensionVirtualModel<TState = unknown> extends Omit<VirtualModelDefinition<TState>, "route"> {
+	/** Like `VirtualModelDefinition.route`, with an extension context. */
+	route(request: ModelRouteRequest<TState>, ctx: ExtensionContext): ModelRoute<TState> | Promise<ModelRoute<TState>>;
+}
 
 /** Configuration for registering a provider via pi.registerProvider(). */
 export interface ProviderConfig {
@@ -1643,13 +1681,19 @@ export interface ProviderConfig {
 	 * (`getCurrentSystemPrompt(context.messages)`, `getCurrentTools(context.messages)`).
 	 * Implementations must invoke `options.onPayload` before sending the provider request and use any
 	 * returned replacement payload. They must invoke `options.onResponse` after receiving the response
-	 * and before consuming its body, matching built-in providers.
+	 * and before consuming its body, matching built-in providers. Implementations may invoke
+	 * `options.onProviderStreamEvent(data, model)` with parsed stream events before normalization.
+	 * Event data is adapter-owned and must be treated as read-only.
 	 */
 	streamSimple?: (
 		model: Model<Api>,
 		context: TranscriptContext,
 		options?: SimpleStreamOptions,
 	) => AssistantMessageEventStream;
+	/** Image-generation implementations keyed by image API. */
+	images?: Partial<Record<ImageApi, ProviderImages>>;
+	/** Classifier implementations keyed by classifier API. */
+	classifiers?: Partial<Record<ClassifierApi, ProviderClassifier>>;
 	/** Custom headers to include in requests. */
 	headers?: Record<string, string>;
 	/** If true, adds Authorization: Bearer header with the resolved API key. */
@@ -1680,37 +1724,60 @@ export interface ProviderConfig {
 	};
 }
 
-/** Configuration for a model within a provider. */
-export interface ProviderModelConfig {
-	/** Model ID (e.g., "claude-sonnet-4-20250514"). */
+interface ProviderModelConfigBase {
+	/** Model ID. */
 	id: string;
-	/** Display name (e.g., "Claude 4 Sonnet"). */
+	/** Display name. */
 	name: string;
 	/** API type override for this model. */
-	api?: Api;
+	api?: string;
 	/** API endpoint URL override for this model. */
 	baseUrl?: string;
+	/** Supported input types. */
+	input: ("text" | "image")[];
+	/** Provider input limits and cache-safe image preprocessing metadata. */
+	inputLimits?: AnyModel["inputLimits"];
+	/** Per-million-token cost rates and optional request-wide input pricing tiers. */
+	cost: AnyModel["cost"];
+	/** Custom headers for this model. */
+	headers?: Record<string, string>;
+}
+
+/** Chat model configuration. Omitted `type` is normalized to `"chat"`. */
+export interface ProviderChatModelConfig extends ProviderModelConfigBase {
+	type?: "chat";
+	api?: Api;
 	/** Whether the model supports extended thinking. */
 	reasoning: boolean;
 	/** Maps pi thinking levels to provider/model-specific values; null marks a level unsupported. */
 	thinkingLevelMap?: Model<Api>["thinkingLevelMap"];
-	/** Supported input types. */
-	input: ("text" | "image")[];
-	/** Provider input limits and cache-safe image preprocessing metadata. */
-	inputLimits?: Model<Api>["inputLimits"];
-	/** Per-million-token cost rates and optional request-wide input pricing tiers. */
-	cost: Model<Api>["cost"];
 	/** Best-effort prompt cache lifetime in seconds per retention tier. Unset disables cache warming. */
 	promptCache?: Model<Api>["promptCache"];
 	/** Maximum context window size in tokens. */
 	contextWindow: number;
 	/** Maximum output tokens. */
 	maxTokens: number;
-	/** Custom headers for this model. */
-	headers?: Record<string, string>;
+	samplingParams?: Record<string, unknown>;
 	/** OpenAI compatibility settings. */
 	compat?: Model<Api>["compat"];
 }
+
+/** Image-generation model configuration. */
+export interface ProviderImageModelConfig extends ProviderModelConfigBase {
+	type: "image";
+	api?: ImageApi;
+	output: ("text" | "image")[];
+}
+
+/** Structured classifier model configuration. */
+export interface ProviderClassifierModelConfig extends ProviderModelConfigBase {
+	type: "classifier";
+	api?: ClassifierApi;
+	contextWindow: number;
+}
+
+/** Configuration for a model within a provider. */
+export type ProviderModelConfig = ProviderChatModelConfig | ProviderImageModelConfig | ProviderClassifierModelConfig;
 
 /** Extension factory function type. Supports both sync and async initialization. */
 export type ExtensionFactory = (pi: ExtensionAPI) => void | Promise<void>;
@@ -1800,6 +1867,10 @@ export interface ExtensionRuntimeState {
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; extensionPath: string }>;
 	/** Native pi-ai provider registrations queued during extension loading, processed when runner binds. */
 	pendingNativeProviderRegistrations: Array<{ provider: Provider; extensionPath: string }>;
+	/** Virtual model registrations queued during extension loading, processed when runner binds. */
+	pendingVirtualModelRegistrations: Array<{ definition: VirtualModelDefinition; extensionPath: string }>;
+	/** Create an extension context. Throws before the runner binds. */
+	createContext: () => ExtensionContext;
 	/** Throws when this extension instance is stale after runtime replacement. */
 	assertActive: () => void;
 	/** Marks this extension instance as stale after runtime replacement or reload. */
@@ -1815,6 +1886,8 @@ export interface ExtensionRuntimeState {
 	registerProvider: (name: string, config: ProviderConfig, extensionPath?: string) => void;
 	registerNativeProvider: (provider: Provider, extensionPath?: string) => void;
 	unregisterProvider: (name: string, extensionPath?: string) => void;
+	registerVirtualModel: (definition: VirtualModelDefinition, extensionPath?: string) => void;
+	unregisterVirtualModel: (provider: string, id: string) => void;
 }
 
 /**
@@ -1909,6 +1982,7 @@ export interface Extension {
 export interface LoadExtensionsResult {
 	extensions: Extension[];
 	errors: Array<{ path: string; error: string }>;
+	warnings?: Array<{ path: string; warning: string }>;
 	/** Shared runtime - actions are throwing stubs until runner.initialize() */
 	runtime: ExtensionRuntime;
 }

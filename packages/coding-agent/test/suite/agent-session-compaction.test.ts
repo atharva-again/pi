@@ -282,6 +282,8 @@ describe("AgentSession compaction characterization", () => {
 	it("throws when compacting without configured auth", async () => {
 		const harness = await createHarness({ withConfiguredAuth: false });
 		harnesses.push(harness);
+		// Auth is resolved only when Pi summarizes itself, after checking there is something to compact.
+		seedCompactableSession(harness);
 
 		await expect(harness.session.compact()).rejects.toThrow(`No API key found for ${harness.getModel().provider}.`);
 	});
@@ -354,7 +356,8 @@ describe("AgentSession compaction characterization", () => {
 		expect(transformContext).not.toHaveBeenCalled();
 		expect(getCurrentSystemPrompt(requestContext?.messages ?? [])).not.toBe(harness.session.agent.state.systemPrompt);
 		expect(getCurrentTools(requestContext?.messages ?? [])).toEqual([]);
-		expect(JSON.stringify(requestContext?.messages)).toContain("<conversation>");
+		// Regression test for #9652: split-turn summaries use a clear Markdown conversation boundary.
+		expect(JSON.stringify(requestContext?.messages)).toContain("# Conversation\\n[User]: message to compact");
 		expect(requestOptions).toMatchObject({ cacheRetention: "none" });
 		expect(requestOptions?.sessionId).not.toBe("active-routing-session");
 		expect(requestOptions?.transport).toBeUndefined();

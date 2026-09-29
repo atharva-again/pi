@@ -18,12 +18,14 @@ import { execCommand } from "../exec.ts";
 import { readPiManifest } from "../pi-manifest.ts";
 import { createSyntheticSourceInfo } from "../source-info.ts";
 import { time } from "../timings.ts";
+import type { ModelRouteRequest, VirtualModelDefinition } from "../virtual-models.ts";
 import type {
 	EntryRenderer,
 	Extension,
 	ExtensionAPI,
 	ExtensionFactory,
 	ExtensionRuntime,
+	ExtensionVirtualModel,
 	LoadExtensionsResult,
 	MarkdownTransformer,
 	MessageRenderer,
@@ -181,6 +183,8 @@ export function createExtensionRuntime(): ExtensionRuntime {
 		flagValues: new Map(),
 		pendingProviderRegistrations: [],
 		pendingNativeProviderRegistrations: [],
+		pendingVirtualModelRegistrations: [],
+		createContext: notInitialized,
 		assertActive,
 		invalidate: (message) => {
 			if (state.staleMessage) return;
@@ -213,6 +217,14 @@ export function createExtensionRuntime(): ExtensionRuntime {
 			runtime.pendingProviderRegistrations = runtime.pendingProviderRegistrations.filter((r) => r.name !== name);
 			runtime.pendingNativeProviderRegistrations = runtime.pendingNativeProviderRegistrations.filter(
 				(r) => r.provider.id !== name,
+			);
+		},
+		registerVirtualModel: (definition, extensionPath = "<unknown>") => {
+			runtime.pendingVirtualModelRegistrations.push({ definition, extensionPath });
+		},
+		unregisterVirtualModel: (provider, id) => {
+			runtime.pendingVirtualModelRegistrations = runtime.pendingVirtualModelRegistrations.filter(
+				({ definition }) => definition.provider !== provider || definition.id !== id,
 			);
 		},
 	};
@@ -433,6 +445,22 @@ function createExtensionAPI(
 			applyRuntimeChange(() => runtime.unregisterProvider(name, extension.path));
 		},
 
+		registerVirtualModel<TState>(model: ExtensionVirtualModel<TState>) {
+			assertActive();
+			// Routing runs after the runner binds, so the context is created per request. The state
+			// comes from the session branch that this router wrote.
+			const definition: VirtualModelDefinition = {
+				...model,
+				route: (request) => model.route(request as ModelRouteRequest<TState>, runtime.createContext()),
+			};
+			applyRuntimeChange(() => runtime.registerVirtualModel(definition, extension.path));
+		},
+
+		unregisterVirtualModel(provider: string, id: string) {
+			assertActive();
+			applyRuntimeChange(() => runtime.unregisterVirtualModel(provider, id));
+		},
+
 		events: {
 			emit(channel, data) {
 				assertActive();
@@ -605,6 +633,7 @@ async function loadExtensionsInternal(
 ): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
+	const warnings: Array<{ path: string; warning: string }> = [];
 	const cacheToken = useCache ? useExtensionCacheCwd(cwd) : undefined;
 	const resolvedCwd = cacheToken?.cwd ?? resolvePath(cwd);
 	const resolvedEventBus = eventBus ?? createEventBus();
@@ -632,6 +661,7 @@ async function loadExtensionsInternal(
 	return {
 		extensions,
 		errors,
+		warnings,
 		runtime: resolvedRuntime,
 	};
 }

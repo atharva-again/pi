@@ -92,11 +92,21 @@ export function parseArgs(args: string[]): Args {
 			result.help = true;
 		} else if (arg === "--version" || arg === "-v") {
 			result.version = true;
-		} else if (arg === "--mode" && i + 1 < args.length) {
-			const mode = args[++i];
-			if (mode === "text" || mode === "json" || mode === "rpc") {
-				result.mode = mode;
+		} else if (arg === "--mode") {
+			const mode = args[i + 1];
+			if (mode === undefined || mode.startsWith("-")) {
+				result.diagnostics.push({ type: "error", message: "--mode requires text, json, or rpc" });
+				continue;
 			}
+			i++;
+			if (mode !== "text" && mode !== "json" && mode !== "rpc") {
+				result.diagnostics.push({
+					type: "error",
+					message: `Invalid mode "${mode}". Valid values: text, json, rpc`,
+				});
+				continue;
+			}
+			result.mode = mode;
 		} else if (arg === "--continue" || arg === "-c") {
 			result.continue = true;
 		} else if (arg === "--resume" || arg === "-r") {
