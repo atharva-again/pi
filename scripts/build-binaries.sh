@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 #
-# Build pi binaries for all platforms locally.
-# Mirrors .github/workflows/build-binaries.yml
+# Build Pi binaries for local testing.
 #
 # Usage:
 #   ./scripts/build-binaries.sh [--skip-install] [--skip-build] [--offline-model-data] [--platform <platform>] [--out <dir>]
@@ -134,7 +133,7 @@ for platform in "${PLATFORMS[@]}"; do
     fi
 done
 
-echo "==> Creating release archives..."
+echo "==> Creating local test archives..."
 
 # Copy shared files to each platform directory
 for platform in "${PLATFORMS[@]}"; do
@@ -184,7 +183,7 @@ for platform in "${PLATFORMS[@]}"; do
 done
 
 echo ""
-echo "==> Build complete!"
+echo "==> Local binary build complete!"
 echo "Archives available in $OUTPUT_DIR/"
 ls -lh *.tar.gz *.zip 2>/dev/null || true
 echo ""

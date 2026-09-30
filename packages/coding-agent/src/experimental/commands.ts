@@ -5,42 +5,18 @@ import type { ServerCommand } from "../cli/experimental/commands/server.ts";
 import { areExperimentalFeaturesEnabled } from "../core/experimental.ts";
 import { runClient } from "./client.ts";
 import { runClientTui } from "./client-tui.ts";
-import type { RadiusRelayHostStatus } from "./radius-relay.ts";
 import { startForegroundServer } from "./server.ts";
 
 async function runServerCommand(command: ServerCommand): Promise<void> {
-	let previousRelayStatus = "";
-	let relayOutputReady = false;
-	let pendingRelayStatus: RadiusRelayHostStatus | undefined;
-	const reportRelayStatus = (status: RadiusRelayHostStatus): void => {
-		const description =
-			status.status === "connected"
-				? "connected"
-				: status.status === "not_authenticated"
-					? "not connected; local only"
-					: status.status === "retrying"
-						? `reconnecting: ${status.error}`
-						: "connecting";
-		if (description === previousRelayStatus || status.status === "connecting") return;
-		previousRelayStatus = description;
-		console.log(`Radius: ${description}`);
-	};
 	const runtime = await startForegroundServer({
 		serverId: command.serverId,
 		sessionDir: command.sessionDir,
 		provider: command.provider,
 		model: command.model,
 		pluginPackages: command.pluginPackages ?? [],
-		relayAuth: command.auth,
-		onRelayStatus(status) {
-			if (relayOutputReady) reportRelayStatus(status);
-			else pendingRelayStatus = status;
-		},
 	});
 	console.log(`Server: ${runtime.serverId}`);
 	console.log(`Socket: ${runtime.socketPath}`);
-	relayOutputReady = true;
-	if (pendingRelayStatus !== undefined) reportRelayStatus(pendingRelayStatus);
 	try {
 		await new Promise<void>((resolve, reject) => {
 			const cleanup = (): void => {

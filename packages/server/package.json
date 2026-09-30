@@ -29,8 +29,7 @@
 		"dev": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
 		"build": "tsc -p tsconfig.build.json",
 		"test": "vitest --run",
-		"typecheck": "tsc -p tsconfig.test.json",
-		"prepublishOnly": "npm run clean && npm run build"
+		"typecheck": "tsc -p tsconfig.test.json"
 	},
 	"keywords": [
 		"pi",
@@ -40,7 +39,7 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/earendil-works/pi.git",
+		"url": "git+https://github.com/atharva-again/pi.git",
 		"directory": "packages/server"
 	},
 	"engines": {

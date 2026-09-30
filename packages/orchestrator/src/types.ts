@@ -7,11 +7,6 @@ export interface MachineRecord {
 	label?: string;
 }
 
-export interface RadiusRegistration {
-	heartbeatIntervalMs: number;
-	expiresInMs: number;
-}
-
 export interface InstanceRecord {
 	id: string;
 	status: InstanceStatus;
@@ -21,5 +16,4 @@ export interface InstanceRecord {
 	label?: string;
 	sessionId?: string;
 	sessionFile?: string;
-	radiusPiId?: string;
 }

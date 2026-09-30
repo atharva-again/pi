@@ -23,8 +23,8 @@ const packages = [
 function printUsage() {
 	console.log(`Usage: node scripts/local-release.mjs [options]
 
-Builds and packs the publishable packages, then installs the tarballs into an
-isolated directory outside the repository for local release testing.
+Builds and packs the workspace packages, then installs the tarballs into an
+isolated directory outside the repository to smoke-test the packaged CLI.
 
 Options:
   --out <dir>          Output directory. Defaults to a new directory under ${tmpdir()}
@@ -119,7 +119,7 @@ function isInsidePath(child, parent) {
 
 function prepareOutputDirectory(options, repoRoot) {
 	if (!options.outDir) {
-		return mkdtempSync(join(tmpdir(), "pi-local-release-"));
+		return mkdtempSync(join(tmpdir(), "pi-local-distribution-"));
 	}
 
 	const outDir = resolve(options.outDir);
@@ -146,9 +146,9 @@ function currentBinaryPlatform() {
 	throw new Error(`Unsupported binary platform: ${process.platform} ${process.arch}`);
 }
 
-function buildBunBinaryRelease(targetDirectory, archiveDirectory) {
+function buildBunBinary(targetDirectory, archiveDirectory) {
 	if (!commandExists("bun")) {
-		throw new Error("Bun is required for the local binary release build.");
+		throw new Error("Bun is required for the local binary smoke build.");
 	}
 	const platform = currentBinaryPlatform();
 	const binaryBuildDirectory = join(archiveDirectory, "binary-build");
@@ -186,8 +186,8 @@ const options = parseArgs();
 const repoRoot = process.cwd();
 const rootPackageJson = readPackageJson(repoRoot);
 
-if (rootPackageJson.name !== "pi-monorepo") {
-	throw new Error("Run this script from the repository root");
+if (rootPackageJson.name !== "tandoor") {
+	throw new Error("Run this script from the Tandoor repository root");
 }
 
 const outDir = prepareOutputDirectory(options, repoRoot);
@@ -197,7 +197,7 @@ const bunInstallDirectory = join(outDir, "bun-install");
 const binaryDirectory = join(outDir, "bun");
 mkdirSync(tarballDirectory, { recursive: true });
 
-// Release artifacts always use a freshly generated, strictly validated catalog,
+// Distribution tests always use a freshly generated, strictly validated catalog,
 // including when checks or tests are explicitly skipped.
 run("npm", ["run", "generate:models"], { cwd: repoRoot });
 
@@ -218,7 +218,7 @@ const tarballs = packReleasePackages(packages, tarballDirectory);
 
 let binaryPlatform;
 if (!options.skipInstall) {
-	binaryPlatform = buildBunBinaryRelease(binaryDirectory, outDir);
+	binaryPlatform = buildBunBinary(binaryDirectory, outDir);
 
 	installCodingAgentConsumer(nodeInstallDirectory, tarballs);
 	smokeTestCodingAgentConsumer(nodeInstallDirectory);
@@ -234,7 +234,7 @@ if (!options.skipInstall) {
 	}
 }
 
-console.log("\nLocal release artifacts created:");
+console.log("\nLocal distribution test artifacts created:");
 console.log(`  ${outDir}`);
 console.log("\nTarballs:");
 for (const tarball of tarballs.values()) {
@@ -242,10 +242,10 @@ for (const tarball of tarballs.values()) {
 }
 
 if (!options.skipInstall) {
-	console.log("\nLocal Bun binary release:");
+	console.log("\nLocal Bun binary smoke build:");
 	console.log(`  ${binaryDirectory}`);
 	console.log(`  ${join(outDir, `pi-${binaryPlatform}.${String(binaryPlatform).startsWith("windows-") ? "zip" : "tar.gz"}`)}`);
-	console.log("\nRun the local Bun binary release from outside the repository:");
+	console.log("\nRun the locally built Bun binary from outside the repository:");
 	console.log(`  ${join(binaryDirectory, String(binaryPlatform).startsWith("windows-") ? "pi.exe" : "pi")} --help`);
 
 	console.log("\nIsolated npm install:");

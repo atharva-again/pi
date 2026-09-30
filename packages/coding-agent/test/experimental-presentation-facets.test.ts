@@ -29,16 +29,6 @@ afterEach(async () => {
 });
 
 describe("server-selected presentation facets", () => {
-	test("rejects local plugin paths for Radius servers", async () => {
-		await expect(
-			openClientRuntime({
-				command: "client",
-				connect: { transport: "radius", serverId: randomUUID() },
-				pluginPackages: ["./local-plugin"],
-			}),
-		).rejects.toThrow("only be configured on a local Unix server");
-	});
-
 	test("restores plugin package selections for later server generations", async () => {
 		const directory = await mkdtemp("/tmp/pi-presentation-profile-");
 		directories.add(directory);

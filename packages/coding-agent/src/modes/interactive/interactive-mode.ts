@@ -9,14 +9,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { AuthEvent, AuthPrompt } from "@earendil-works/pi-ai";
-import {
-	type AssistantMessage,
-	type ImageContent,
-	isRetryableAssistantError,
-	type Message,
-	type Model,
-	type Usage,
-} from "@earendil-works/pi-ai/compat";
+import type { AssistantMessage, ImageContent, Message, Model, Usage } from "@earendil-works/pi-ai/compat";
 import type {
 	AutocompleteItem,
 	AutocompleteProvider,
@@ -126,7 +119,6 @@ import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { loadAllHighlightLanguages } from "../../utils/syntax-highlight.ts";
 import { ensureTool, type ToolStatus } from "../../utils/tools-manager.ts";
 import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
-import { reportBug } from "./bug-report.ts";
 import { createChatViewport } from "./chat-viewport.ts";
 import { ArminComponent } from "./components/armin.ts";
 import { AssistantMessageComponent } from "./components/assistant-message.ts";
@@ -175,7 +167,6 @@ import { UserMessageSelectorComponent } from "./components/user-message-selector
 import { editInExternalEditor } from "./external-editor.ts";
 import { refreshModelCatalogs } from "./model-catalog-refresh.ts";
 import { getModelSearchText } from "./model-search.ts";
-import { shareSession } from "./session-share.ts";
 import {
 	getAvailableThemes,
 	getAvailableThemesWithPaths,
@@ -557,9 +548,6 @@ export class InteractiveMode {
 
 	// Shutdown state
 	private shutdownRequested = false;
-
-	/** The `/bug` hint is shown at most once per session so error output stays readable. */
-	private bugReportHintShown = false;
 
 	// Extension UI state
 	private extensionSelector: ExtensionSelectorComponent | undefined = undefined;
@@ -1213,9 +1201,7 @@ export class InteractiveMode {
 		const crash = takeUnnotifiedCrash();
 		if (crash) {
 			const when = new Date(crash.timestamp).toLocaleString();
-			this.showWarning(
-				`${APP_NAME} crashed on ${when} (${crash.message}). Run /bug to report it; the crash details are attached automatically.`,
-			);
+			this.showWarning(`${APP_NAME} crashed on ${when} (${crash.message}). Crash details were saved locally.`);
 		}
 
 		void this.maybeWarnAboutAnthropicSubscriptionAuth();
@@ -2094,10 +2080,7 @@ export class InteractiveMode {
 		if (extensionHint) {
 			this.chatContainer.addChild(new ThemedText(() => theme.fg("warning", extensionHint), this.outputPad, 0));
 		}
-		if (this.recordCrash("fatal_error", error)) {
-			const instructions = this.crashReportInstructions();
-			this.chatContainer.addChild(new ThemedText(() => theme.fg("muted", instructions), this.outputPad, 0));
-		}
+		this.recordCrash("fatal_error", error);
 		stopThemeWatcher();
 		this.stop("transcript");
 		process.exit(1);
@@ -2116,44 +2099,18 @@ export class InteractiveMode {
 		}
 	}
 
-	/** Persist a crash so the next start can point the user at `/bug`. Returns false when nothing was written. */
-	private recordCrash(kind: "uncaught_exception" | "fatal_error", error: unknown): boolean {
+	/** Persist a crash for local diagnosis. */
+	private recordCrash(kind: "uncaught_exception" | "fatal_error", error: unknown): void {
 		try {
-			return (
-				recordCrash({
-					kind,
-					error,
-					sessionFile: this.session.sessionFile,
-					cwd: this.session.sessionManager.getCwd(),
-				}) !== undefined
-			);
+			recordCrash({
+				kind,
+				error,
+				sessionFile: this.session.sessionFile,
+				cwd: this.session.sessionManager.getCwd(),
+			});
 		} catch {
-			return false;
+			// Crash logging must not interfere with error handling.
 		}
-	}
-
-	private crashReportInstructions(): string {
-		const resume = this.session.sessionFile ? `run \`${APP_NAME} -r\` to resume the session, then` : "start pi and";
-		return `To report this crash: ${resume} run /bug. The crash details are attached automatically.`;
-	}
-
-	private suggestBugReport(): void {
-		if (this.bugReportHintShown) return;
-		this.bugReportHintShown = true;
-		this.chatContainer.addChild(
-			new ThemedText(
-				() => theme.fg("muted", `If this looks like a ${APP_NAME} bug, /bug sends a report to the developers.`),
-				this.outputPad,
-				0,
-			),
-		);
-		this.ui.requestRender();
-	}
-
-	private maybeSuggestBugReport(message: AssistantMessage): void {
-		if (message.stopReason !== "error" || isRetryableAssistantError(message)) return;
-		if (/\b(?:abort(?:ed)?|cancel(?:l?ed)?)\b/i.test(message.errorMessage ?? "")) return;
-		this.suggestBugReport();
 	}
 
 	private renderCurrentSessionState(): void {
@@ -3171,17 +3128,6 @@ export class InteractiveMode {
 				this.editor.setText("");
 				return;
 			}
-			if (text === "/share") {
-				await this.handleShareCommand();
-				this.editor.setText("");
-				return;
-			}
-			if (text === "/bug" || text.startsWith("/bug ")) {
-				const hint = text.slice("/bug".length).trim();
-				this.editor.setText("");
-				await this.handleBugCommand(hint ? hint : undefined);
-				return;
-			}
 			if (text === "/copy") {
 				await this.handleCopyCommand();
 				this.editor.setText("");
@@ -3525,7 +3471,6 @@ export class InteractiveMode {
 							});
 						}
 						this.pendingTools.clear();
-						this.maybeSuggestBugReport(this.streamingMessage);
 					} else {
 						// Args are now complete - trigger diff computation for edit tools
 						for (const [, component] of this.pendingTools.entries()) {
@@ -4308,9 +4253,7 @@ export class InteractiveMode {
 		console.error(error);
 		const extensionHint = this.getCrashExtensionHint(error);
 		if (extensionHint) console.error(`\n${extensionHint}`);
-		if (this.recordCrash("uncaught_exception", error)) {
-			console.error(`\n${this.crashReportInstructions()}`);
-		}
+		this.recordCrash("uncaught_exception", error);
 		process.exit(1);
 	}
 
@@ -6031,10 +5974,7 @@ export class InteractiveMode {
 					selectionError = `${actionLabel}, but no models are available for that provider. Use /model to select a model.`;
 				} else {
 					const defaultModelId = defaultModelPerProvider[providerId];
-					// Radius catalogs vary by account; prefer balanced, then use catalog order.
-					selectedModel =
-						providerModels.find((model) => model.id === defaultModelId) ??
-						(providerId === "radius" ? providerModels[0] : undefined);
+					selectedModel = providerModels.find((model) => model.id === defaultModelId);
 					if (!selectedModel) {
 						selectionError = `${actionLabel}, but its default model "${defaultModelId}" is not available. Use /model to select a model.`;
 					} else {
@@ -6470,32 +6410,6 @@ export class InteractiveMode {
 			}
 			await this.handleFatalRuntimeError("Failed to import session", error);
 		}
-	}
-
-	private async handleShareCommand(): Promise<void> {
-		await shareSession({
-			session: this.session,
-			ui: this.ui,
-			editorContainer: this.editorContainer,
-			editor: this.editor,
-			showStatus: (message) => this.showStatus(message),
-			showError: (message) => this.showError(message),
-		});
-	}
-
-	private async handleBugCommand(hint: string | undefined): Promise<void> {
-		await reportBug(
-			{
-				session: this.session,
-				ui: this.ui,
-				editorContainer: this.editorContainer,
-				editor: this.editor,
-				keybindings: this.keybindings,
-				showStatus: (message) => this.showStatus(message),
-				showError: (message) => this.showError(message),
-			},
-			hint,
-		);
 	}
 
 	private async handleCopyCommand(

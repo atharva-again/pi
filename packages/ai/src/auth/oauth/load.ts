@@ -19,7 +19,6 @@ type OAuthFlowLoaders = {
 	kimiCoding: () => OAuthAuth | Promise<OAuthAuth>;
 	meta: () => OAuthAuth | Promise<OAuthAuth>;
 	xai: () => OAuthAuth | Promise<OAuthAuth>;
-	radius: (options: { name: string; gateway: string }) => OAuthAuth | Promise<OAuthAuth>;
 };
 
 let bundledLoaders: OAuthFlowLoaders | undefined;
@@ -62,13 +61,4 @@ export const loadMetaOAuth = async (): Promise<OAuthAuth> => {
 export const loadXaiOAuth = async (): Promise<OAuthAuth> => {
 	if (bundledLoaders) return bundledLoaders.xai();
 	return ((await importOAuthModule("./xai.ts")) as { xaiOAuth: OAuthAuth }).xaiOAuth;
-};
-
-export const loadRadiusOAuth = async (options: { name: string; gateway: string }): Promise<OAuthAuth> => {
-	if (bundledLoaders) return bundledLoaders.radius(options);
-	return (
-		(await importOAuthModule("./radius.ts")) as {
-			createRadiusOAuth: (input: { name: string; gateway: string }) => OAuthAuth;
-		}
-	).createRadiusOAuth(options);
 };

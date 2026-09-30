@@ -59,8 +59,7 @@
 		"check:model-data": "node scripts/check-model-data.ts",
 		"build": "npm run generate-models && npm run build:offline",
 		"build:offline": "npm run check:model-data && tsc -p tsconfig.build.json && shx rm -rf dist/providers/data && shx cp -r src/providers/data dist/providers/data",
-		"test": "vitest --run",
-		"prepublishOnly": "npm run clean && npm run build"
+		"test": "vitest --run"
 	},
 	"dependencies": {
 		"@anthropic-ai/sdk": "0.124.0",
@@ -88,7 +87,7 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/earendil-works/pi.git",
+		"url": "git+https://github.com/atharva-again/pi.git",
 		"directory": "packages/ai"
 	},
 	"engines": {

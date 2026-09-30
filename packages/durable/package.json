@@ -64,8 +64,7 @@
 		"build": "tsc -p tsconfig.build.json",
 		"test": "vitest --run",
 		"bench:storage": "vitest bench --config vitest.benchmark.config.ts",
-		"bench:storage:memory": "node --conditions=source --experimental-strip-types test/storage-memory.ts",
-		"prepublishOnly": "npm run clean && npm run build"
+		"bench:storage:memory": "node --conditions=source --experimental-strip-types test/storage-memory.ts"
 	},
 	"keywords": [
 		"durable-execution",
@@ -77,7 +76,7 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/earendil-works/pi.git",
+		"url": "git+https://github.com/atharva-again/pi.git",
 		"directory": "packages/durable"
 	},
 	"engines": {

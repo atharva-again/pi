@@ -1,17 +1,8 @@
 import { Command, flagOption, stringOption } from "../command.ts";
-import {
-	type AuthInput,
-	authTokenFileOption,
-	authTokenOption,
-	connectOption,
-	parseAuth,
-	type TransportAddress,
-	unsupportedOptions,
-} from "../command-options.ts";
+import { connectOption, type TransportAddress, unsupportedOptions } from "../command-options.ts";
 
 export interface ClientCommand {
 	readonly command: "client";
-	readonly auth?: AuthInput;
 	readonly connect?: TransportAddress;
 	readonly sessionId?: string;
 	readonly continue?: boolean;
@@ -45,10 +36,7 @@ export const clientCommand = new Command<ClientCommand, ClientCommandContext>("c
 	.option(providerOption)
 	.option(modelOption)
 	.option(pluginPackageOption)
-	.option(authTokenOption)
-	.option(authTokenFileOption)
 	.build((input) => {
-		const { auth, errors: authErrors } = parseAuth(input);
 		const connect = input.value(connectOption);
 		const sessionId = input.value(sessionIdOption);
 		const shouldContinue = input.value(continueOption) === true || input.value(continueShortOption) === true;
@@ -70,13 +58,12 @@ export const clientCommand = new Command<ClientCommand, ClientCommandContext>("c
 				: [];
 		const unsupportedErrors =
 			input.remainingArgs.length === 0 || prompt !== undefined ? [] : unsupportedOptions("client", input);
-		const errors = [...authErrors, ...modelErrors, ...sessionSelectionErrors, ...unsupportedErrors];
+		const errors = [...modelErrors, ...sessionSelectionErrors, ...unsupportedErrors];
 		if (errors.length > 0) return { ok: false, errors };
 		return {
 			ok: true,
 			command: {
 				command: "client",
-				...(auth === undefined ? {} : { auth }),
 				...(connect === undefined ? {} : { connect }),
 				...(sessionId === undefined ? {} : { sessionId }),
 				...(shouldContinue ? { continue: true } : {}),

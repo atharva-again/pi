@@ -45,7 +45,6 @@ export type KnownProvider =
 	| "openai"
 	| "azure-openai-responses"
 	| "openai-codex"
-	| "radius"
 	| "typesafe"
 	| "nvidia"
 	| "deepseek"

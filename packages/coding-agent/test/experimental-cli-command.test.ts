@@ -46,16 +46,6 @@ describe("experimental CLI commands", () => {
 			ok: true,
 			command: { command: "client", connect: { transport: "unix", path: "/tmp/pi.sock" } },
 		});
-		expect(
-			cli.parse(["client", "--connect", "radius://00000000-0000-4000-8000-000000000001", "--session-id", "demo-1"]),
-		).toEqual({
-			ok: true,
-			command: {
-				command: "client",
-				connect: { transport: "radius", serverId: "00000000-0000-4000-8000-000000000001" },
-				sessionId: "demo-1",
-			},
-		});
 	});
 
 	test.each([
@@ -98,15 +88,6 @@ describe("experimental CLI commands", () => {
 		});
 	});
 
-	test.each([
-		[["--auth-token", "secret"], { type: "token", token: "secret" }],
-		[["--auth-token-file", "/tmp/token"], { type: "file", path: "/tmp/token" }],
-	] as const)("parses authentication source %j", (argv, auth) => {
-		for (const command of ["server", "client"] as const) {
-			expect(cli.parse([command, ...argv])).toMatchObject({ ok: true, command: { command, auth } });
-		}
-	});
-
 	test.each(["server", "client"] as const)("permits omitted authentication for %s", (command) => {
 		expect(cli.parse([command])).toEqual({ ok: true, command: { command } });
 	});
@@ -116,7 +97,6 @@ describe("experimental CLI commands", () => {
 		[["server", "--listen", "unix:///tmp/pi.sock"], UNSUPPORTED_SERVER_OPTIONS],
 		[["server", "--connect", "unix:///tmp/pi.sock"], UNSUPPORTED_SERVER_OPTIONS],
 		[["client", "--connect", "ws://localhost:8080"], 'Unsupported --connect transport "ws:"'],
-		[["client", "--connect", "radius://not-a-server"], "Radius transport address requires"],
 		[["client", "--connect", "unix://relative.sock"], "Unix transport address must not include an authority"],
 		[["client", "--connect", "unix:///tmp/pi.sock?wrong=value"], "Invalid --connect address"],
 		[["client", "--provider", "anthropic"], "--provider requires --model"],

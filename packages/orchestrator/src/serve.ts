@@ -3,7 +3,6 @@ import { dirname } from "node:path";
 import { getSocketPath } from "./config.ts";
 import { handleIpcRequest, openRpcStream } from "./handler.ts";
 import { startIpcServer } from "./ipc/server.ts";
-import { getRadiusOrchestratorBaseUrl, isRadiusEnabled, radiusPresence } from "./radius.ts";
 import { supervisor } from "./supervisor.ts";
 
 export async function serve(): Promise<void> {
@@ -17,15 +16,6 @@ export async function serve(): Promise<void> {
 
 	try {
 		await supervisor.recoverAfterRestart();
-		if (isRadiusEnabled()) {
-			const machine = await radiusPresence.start();
-			console.log(`radius integration enabled: ${socketPath} -> ${getRadiusOrchestratorBaseUrl()}`);
-			if (machine) {
-				console.log(`radius machine id: ${machine.id}`);
-			}
-		} else {
-			console.log("radius integration disabled: login radius in ~/.pi/agent/auth.json or set RADIUS_API_KEY");
-		}
 	} catch (error) {
 		server.close();
 		if (existsSync(socketPath)) {
@@ -46,7 +36,6 @@ export async function serve(): Promise<void> {
 		shutdownPromise = (async () => {
 			server.close();
 			await supervisor.shutdown();
-			await radiusPresence.stop();
 			if (existsSync(socketPath)) {
 				unlinkSync(socketPath);
 			}

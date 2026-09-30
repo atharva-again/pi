@@ -18,7 +18,7 @@ PI_EXPERIMENTAL=1 ./pi-test.sh client \
   -e "$PWD/packages/coding-agent/examples/plugins/pi-example-plugin"
 ```
 
-Repeat `-e` to select multiple plugin packages. Client paths are resolved locally and sent only to a Unix server; Radius clients cannot select server filesystem paths. The Session and matching TUI facets are stored with that Session, so later server generations and clients can resume it without plugin arguments. Other Sessions and their workers are unaffected. An active Session rejects a different package selection instead of being restarted.
+Repeat `-e` to select multiple plugin packages. Client paths are resolved locally and sent only to the Unix server. The Session and matching TUI facets are stored with that Session, so later server generations and clients can resume it without plugin arguments. Other Sessions and their workers are unaffected. An active Session rejects a different package selection instead of being restarted.
 
 `server -e` establishes the server profile's default Session and TUI facets. Starting an explicit foreground server without `-e` clears that default. Client selection never changes the server's root facet generation.
 

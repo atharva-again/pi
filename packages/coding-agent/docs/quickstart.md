@@ -4,27 +4,22 @@ Pi runs in your terminal and works with files on your machine. To use it, you ne
 
 For native Windows setup, read [Windows Setup](windows.md). For Android, read [Termux Setup](termux.md).
 
-## 1. Install Pi
+## 1. Run this fork from source
 
-On macOS or Linux, you can use the installer:
-
-```bash
-curl -fsSL https://pi.dev/install.sh | sh
-```
-
-Alternatively, install Pi from npm. This requires Node.js 22.19 or newer:
+This fork does not publish npm packages or binary releases. The upstream installer and npm package install a different codebase. From the fork checkout, install dependencies:
 
 ```bash
-npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+npm install --ignore-scripts
 ```
 
-Pi does not require dependency lifecycle scripts for a normal npm installation.
-
-Verify the installation:
+Then run the source CLI from the working folder:
 
 ```bash
-pi --version
+cd /path/to/working-folder
+/path/to/pi/pi-test.sh
 ```
+
+The launcher uses Node.js 22.19 or newer. For Windows, use the checkout's `pi-test.ps1` or `pi-test.bat` launcher.
 
 ## 2. Start Pi
 
@@ -104,19 +99,3 @@ Start with the least powerful mechanism that meets your need:
 | Build a custom terminal component | [Terminal UI](tui.md) |
 | Connect an unsupported model service | [Custom provider](custom-provider.md) |
 | Install or distribute several resources | [Pi package](packages.md) |
-
-## Uninstall Pi
-
-If you installed Pi with npm, run:
-
-```bash
-npm uninstall -g @earendil-works/pi-coding-agent
-```
-
-If you used the installer, run it again and choose **Uninstall Pi**:
-
-```bash
-curl -fsSL https://pi.dev/install.sh | sh
-```
-
-Neither method removes configuration, credentials, sessions, or installed Pi packages from `~/.pi/agent/`.

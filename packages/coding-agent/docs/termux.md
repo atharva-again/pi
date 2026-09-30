@@ -8,7 +8,7 @@ Install Termux from [GitHub or F-Droid](https://github.com/termux/termux-app#ins
 
 [Termux:API](https://github.com/termux/termux-api#installation) is optional. Install it only when you want Pi to copy or paste Android clipboard text, or when shell commands need Android device APIs.
 
-## Install Pi
+## Run this fork from source
 
 1. Update Termux packages:
 
@@ -22,23 +22,19 @@ Install Termux from [GitHub or F-Droid](https://github.com/termux/termux-app#ins
    pkg install nodejs git
    ```
 
-3. Install Pi:
+3. Clone this fork and install its dependencies (the fork does not publish an npm package):
 
    ```bash
-   npm install -g --ignore-scripts @earendil-works/pi-coding-agent
+   git clone https://github.com/atharva-again/pi.git
+   cd pi
+   npm install --ignore-scripts
    ```
 
-4. Verify the installation:
-
-   ```bash
-   pi --version
-   ```
-
-5. Open the folder you want to work in and start Pi:
+4. Run the source launcher from the folder you want to work in:
 
    ```bash
    cd /path/to/working-folder
-   pi
+   /path/to/pi/pi-test.sh
    ```
 
 Continue with the main [Quickstart](quickstart.md#3-choose-a-model) to connect a model and run your first task.
@@ -105,13 +101,6 @@ Then run the clipboard verification commands above outside Pi. If they fail ther
 
 Run `termux-setup-storage`, approve the Android permission request, and retry the path under `~/storage/` or `/storage/emulated/0`.
 
-### Pi is not found after installation
+### The source launcher is not found
 
-Open a new Termux shell and run:
-
-```bash
-npm prefix -g
-command -v pi
-```
-
-Confirm that the global npm binary directory is on `PATH`, then reinstall Pi if the package is missing.
+Use the full path to `pi-test.sh` from the cloned checkout. The launcher runs the fork's source code and does not install a global `pi` command.

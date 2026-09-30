@@ -60,7 +60,7 @@ export async function runClient(command: ClientCommand, options: RunClientOption
 			if (existing) {
 				match = existing;
 			} else {
-				if (command.connect?.transport === "radius" || command.prompt === undefined || discovered.length !== 1) {
+				if (command.prompt === undefined || discovered.length !== 1) {
 					throw new Error(`No discovered server contains session ${selectedSessionId}`);
 				}
 				match = discovered[0]!;

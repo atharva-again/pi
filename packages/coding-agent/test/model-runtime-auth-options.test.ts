@@ -138,12 +138,6 @@ describe("ModelRuntime auth options", () => {
 					refresh: "",
 					expires: Number.MAX_SAFE_INTEGER,
 				},
-				radius: {
-					type: "oauth",
-					access: "radius-access",
-					refresh: "radius-refresh",
-					expires: Date.now() + 60 * 60_000,
-				},
 			}),
 			modelsPath: null,
 		});
@@ -152,8 +146,6 @@ describe("ModelRuntime auth options", () => {
 		expect(runtime.isUsingSubscription("anthropic")).toBe(true);
 		expect(runtime.isUsingOAuth("openrouter")).toBe(true);
 		expect(runtime.isUsingSubscription("openrouter")).toBe(false);
-		expect(runtime.isUsingOAuth("radius")).toBe(true);
-		expect(runtime.isUsingSubscription("radius")).toBe(false);
 	});
 
 	it("constructs an API key method for an extension API-key provider", async () => {

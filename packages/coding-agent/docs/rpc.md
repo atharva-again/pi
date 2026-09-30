@@ -138,8 +138,8 @@ For maintained TypeScript clients, use the checked [RPC client example](../examp
 - [RPC Extension UI](rpc-extension-ui.md): dialogs, notifications, responses, and limitations
 - [Message Types](message-types.md): messages and content blocks used by responses and events
 - [Session File Format](session-format.md): entries returned by session commands
-- [`rpc-types.ts`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/modes/rpc/rpc-types.ts): exported TypeScript protocol definitions
-- [`RpcClient`](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/src/modes/rpc/rpc-client.ts): subprocess client implementation
+- [`rpc-types.ts`](https://github.com/atharva-again/pi/blob/main/packages/coding-agent/src/modes/rpc/rpc-types.ts): exported TypeScript protocol definitions
+- [`RpcClient`](https://github.com/atharva-again/pi/blob/main/packages/coding-agent/src/modes/rpc/rpc-client.ts): subprocess client implementation
 
 ## Moved reference anchors
 

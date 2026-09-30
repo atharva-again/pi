@@ -30,6 +30,7 @@ Expose only the working folder, credentials, and network destinations needed for
 ## Run Pi in plain Docker
 
 Plain Docker provides the simplest whole-process container boundary.
+This fork does not publish an npm package, so build the image from a fork checkout.
 
 ### Build the image
 
@@ -41,13 +42,13 @@ FROM node:24-bookworm-slim
 RUN apt-get update \
   && apt-get install -y --no-install-recommends bash ca-certificates git ripgrep \
   && rm -rf /var/lib/apt/lists/*
-RUN npm install -g --ignore-scripts @earendil-works/pi-coding-agent
-
-WORKDIR /workspace
-ENTRYPOINT ["pi"]
+WORKDIR /pi
+COPY . .
+RUN npm install --ignore-scripts
+ENTRYPOINT ["/pi/pi-test.sh"]
 ```
 
-Build it from the directory containing the file:
+Build it from the fork checkout root:
 
 ```bash
 docker build -t pi-sandbox -f Dockerfile.pi .
@@ -62,6 +63,7 @@ docker run --rm -it \
   -e ANTHROPIC_API_KEY \
   -v "$PWD:/workspace" \
   -v pi-agent-home:/root/.pi/agent \
+  -w /workspace \
   pi-sandbox
 ```
 

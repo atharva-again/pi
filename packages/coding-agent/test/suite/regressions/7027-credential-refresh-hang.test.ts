@@ -27,6 +27,13 @@ const dynamicModel: Model<"openai-completions"> = {
 	maxTokens: 100,
 };
 
+const openAiDefaultModel: Model<"openai-completions"> = {
+	...dynamicModel,
+	id: defaultModelPerProvider.openai!,
+	name: "OpenAI default",
+	provider: "openai",
+};
+
 describe("issues #7027 and #7113 credential refresh hang", () => {
 	let harness: Harness | undefined;
 
@@ -127,9 +134,11 @@ describe("issues #7027 and #7113 credential refresh hang", () => {
 
 describe("post-login model discovery", () => {
 	let harness: Harness | undefined;
+
 	afterEach(() => {
 		vi.useRealTimers();
 		harness?.cleanup();
+		harness = undefined;
 		vi.restoreAllMocks();
 	});
 
@@ -164,54 +173,52 @@ describe("post-login model discovery", () => {
 			checkDaxnutsEasterEgg: vi.fn(),
 			ui: { requestRender: vi.fn() },
 		};
-		await complete.call(context, "radius", "Radius", "oauth", unknownModel);
-		expect(context.showStatus).toHaveBeenCalledWith(expect.stringContaining("Credentials saved"));
-		expect(context.showError).not.toHaveBeenCalled();
-		expect(setModel).not.toHaveBeenCalled();
+		await complete.call(context, "openai", "OpenAI", "oauth", unknownModel);
+		expect(context.showStatus).toHaveBeenCalledWith(expect.stringContaining("Refreshing model catalog"));
 
 		return {
 			...context,
 			setModel,
 			currentModel,
-			async discover(ids: string[]) {
-				availableModels.mockReturnValue(ids.map((id) => ({ ...model, provider: "radius", id })));
+			async discover(models: Model<Api>[]) {
+				availableModels.mockReturnValue(models);
 				finishRefresh();
 				await vi.advanceTimersByTimeAsync(0);
 			},
 		};
 	}
 
-	it.each([
-		{ models: ["fast", "balanced"], selected: "balanced" },
-		{ models: ["fast", "powerful"], selected: "fast" },
-	])("selects $selected from the refreshed catalog $models", async ({ models, selected }) => {
-		expect(defaultModelPerProvider.radius).toBe("balanced");
+	it("selects the configured default from the refreshed catalog", async () => {
 		const login = await startLogin();
-		await login.discover(models);
-		expect(login.setModel).toHaveBeenCalledWith(expect.objectContaining({ provider: "radius", id: selected }), {
-			persist: true,
-		});
+		const otherModel = { ...openAiDefaultModel, id: "other" };
+		await login.discover([otherModel, openAiDefaultModel]);
+
+		expect(defaultModelPerProvider.openai).toBe(openAiDefaultModel.id);
+		expect(login.setModel).toHaveBeenCalledWith(openAiDefaultModel, { persist: true });
 		expect(login.showError).not.toHaveBeenCalled();
 	});
 
 	it("reports an empty catalog only after refresh", async () => {
 		const login = await startLogin();
 		await login.discover([]);
+
 		expect(login.setModel).not.toHaveBeenCalled();
 		expect(login.showError).toHaveBeenCalledWith(expect.stringContaining("no models are available"));
 	});
 
-	it("preserves a model selected during refresh", async () => {
+	it("preserves a model selected while the catalog refresh is running", async () => {
 		const login = await startLogin();
 		login.currentModel.mockReturnValue(harness!.getModel());
-		await login.discover(["fast", "balanced"]);
+		await login.discover([openAiDefaultModel]);
+
 		expect(login.setModel).not.toHaveBeenCalled();
 		expect(login.showError).not.toHaveBeenCalled();
 	});
 
-	it("bounds refresh to 15 seconds", async () => {
+	it("bounds the catalog refresh to 15 seconds", async () => {
 		const login = await startLogin();
 		await vi.advanceTimersByTimeAsync(15_000);
+
 		expect(login.showWarning).toHaveBeenCalledWith(expect.stringContaining("timed out"));
 		expect(login.showError).toHaveBeenCalledWith(expect.stringContaining("no models are available"));
 		expect(login.setModel).not.toHaveBeenCalled();
