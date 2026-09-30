@@ -284,9 +284,6 @@ function applyModelsJson(
 	config: ModelsJsonProvider | undefined,
 ): AnyModel[] {
 	if (!config) return [...baseModels];
-	if (config.oauth && !config.baseUrl) {
-		throw new Error(`Provider ${providerId}: "baseUrl" is required when "oauth" is set.`);
-	}
 	const hasOverrides = config.modelOverrides && Object.keys(config.modelOverrides).length > 0;
 	if (
 		!config.models?.length &&
@@ -295,7 +292,6 @@ function applyModelsJson(
 		!config.compat &&
 		!hasOverrides &&
 		!config.apiKey &&
-		!config.oauth &&
 		config.authHeader === undefined
 	) {
 		throw new Error(
@@ -304,7 +300,7 @@ function applyModelsJson(
 	}
 
 	const models: AnyModel[] = baseModels.map((model) => {
-		const baseUrl = config.oauth === "radius" ? model.baseUrl : (config.baseUrl ?? model.baseUrl);
+		const baseUrl = config.baseUrl ?? model.baseUrl;
 		return isModelType(model, "chat")
 			? { ...model, baseUrl, compat: mergeCompat(model.compat, config.compat) }
 			: { ...model, baseUrl };

@@ -92,6 +92,6 @@ These practices do not replace isolation, but they reduce exposure or make recov
 
 ## Report a security issue
 
-Follow the repository [Security Policy](https://github.com/earendil-works/pi/blob/main/SECURITY.md). Do not open a public issue for a security-sensitive report.
+Follow the repository [Security Policy](../../../SECURITY.md). Do not open a public issue for a security-sensitive report.
 
 Expected local-agent behavior, prompt injection from untrusted content, lack of a built-in sandbox, and behavior from user-installed extensions or skills are generally outside the security boundary unless the report demonstrates a privilege-boundary bypass or access that the local user did not already have.

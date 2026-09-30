@@ -7,14 +7,12 @@ import type {
 	RpcExtensionUIResponse,
 	RpcResponse,
 } from "@earendil-works/pi-coding-agent";
-import { radiusPresence } from "./radius.ts";
 import { createRpcProcessInstance, type RpcProcessInstance } from "./rpc-process.ts";
 import { getInstance, loadInstances, removeInstance, saveInstances, upsertInstance } from "./storage.ts";
 import type { InstanceRecord, InstanceStatus } from "./types.ts";
 
 interface LiveInstanceResources {
 	rpcProcess?: RpcProcessInstance;
-	radiusPiId?: string;
 	sessionId?: string;
 }
 
@@ -78,9 +76,6 @@ export class OrchestratorSupervisor {
 			...updates,
 			lastSeenAt: new Date().toISOString(),
 		};
-		if (updates.radiusPiId !== undefined) {
-			live.resources.radiusPiId = updates.radiusPiId;
-		}
 		if (updates.sessionId !== undefined) {
 			live.resources.sessionId = updates.sessionId;
 		}
@@ -122,14 +117,6 @@ export class OrchestratorSupervisor {
 		this.setStatus(live, "error");
 		this.clearBindings(live);
 		live.resources.rpcProcess = undefined;
-		if (live.resources.radiusPiId) {
-			try {
-				await radiusPresence.disconnectPi(live.record);
-				this.updateRecord(live, { radiusPiId: undefined });
-			} catch (error) {
-				console.error(`Failed to disconnect Radius Pi ${live.record.id}: ${String(error)}`);
-			}
-		}
 		this.liveInstances.delete(live.record.id);
 	}
 
@@ -157,15 +144,6 @@ export class OrchestratorSupervisor {
 	private async cleanupAcquiredResources(live: LiveInstance): Promise<void> {
 		const rpcProcess = live.resources.rpcProcess;
 		this.clearBindings(live);
-		if (live.resources.radiusPiId) {
-			await radiusPresence.disconnectPi(live.record);
-			live.resources.radiusPiId = undefined;
-			live.record = {
-				...live.record,
-				radiusPiId: undefined,
-				lastSeenAt: new Date().toISOString(),
-			};
-		}
 		live.resources.sessionId = undefined;
 		if (rpcProcess) {
 			live.resources.rpcProcess = undefined;
@@ -188,7 +166,6 @@ export class OrchestratorSupervisor {
 		const live = this.liveInstances.get(instance.id);
 		if (live) {
 			live.record = instance;
-			live.resources.radiusPiId = instance.radiusPiId;
 			live.resources.sessionId = instance.sessionId;
 		}
 		upsertInstance(instance);
@@ -248,9 +225,6 @@ export class OrchestratorSupervisor {
 			status: instance.status === "online" || instance.status === "starting" ? "stopped" : instance.status,
 			lastSeenAt: recoveredAt,
 		}));
-		for (const instance of instances) {
-			await radiusPresence.disconnectPi(instance);
-		}
 		saveInstances(instances);
 	}
 
@@ -288,8 +262,6 @@ export class OrchestratorSupervisor {
 			const rpcProcess = createRpcProcessInstance({ cwd: options.cwd });
 			this.bindRpcProcess(live, rpcProcess);
 			await this.syncInstanceRecord(live);
-			const registeredRecord = await radiusPresence.registerPi(live.record);
-			this.updateRecord(live, { radiusPiId: registeredRecord.radiusPiId });
 			this.setStatus(live, "online");
 			return cloneInstance(live.record);
 		} catch (error) {
@@ -340,15 +312,3 @@ export class OrchestratorSupervisor {
 }
 
 export const supervisor = new OrchestratorSupervisor();
-
-radiusPresence.setCoordinator({
-	getLiveInstance(instanceId) {
-		return supervisor.getLiveInstance(instanceId);
-	},
-	listLiveInstances() {
-		return supervisor.listLiveInstances();
-	},
-	updateInstance(instance) {
-		supervisor.updateInstance(instance);
-	},
-});

@@ -1,4 +1,4 @@
-import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { getAgentDir, VERSION } from "../config.ts";
 import type { Extension } from "./extensions/types.ts";
@@ -158,12 +158,4 @@ export function takeUnnotifiedCrash(path = crashLogPath(), now = Date.now()): Cr
 		// Showing the notice again is harmless.
 	}
 	return crash;
-}
-
-export function clearCrashLog(path = crashLogPath()): void {
-	try {
-		rmSync(path, { force: true });
-	} catch {
-		// The records can be attached again if cleanup fails.
-	}
 }

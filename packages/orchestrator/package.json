@@ -23,8 +23,7 @@
 	"scripts": {
 		"clean": "shx rm -rf dist",
 		"dev": "tsc -p tsconfig.build.json --watch --preserveWatchOutput",
-		"build": "tsc -p tsconfig.build.json && shx chmod +x dist/cli.js",
-		"prepublishOnly": "npm run clean && npm run build"
+		"build": "tsc -p tsconfig.build.json && shx chmod +x dist/cli.js"
 	},
 	"keywords": [
 		"pi",
@@ -34,7 +33,7 @@
 	"license": "MIT",
 	"repository": {
 		"type": "git",
-		"url": "git+https://github.com/earendil-works/pi.git",
+		"url": "git+https://github.com/atharva-again/pi.git",
 		"directory": "packages/orchestrator"
 	},
 	"engines": {

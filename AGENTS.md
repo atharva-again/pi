@@ -1,5 +1,27 @@
 # Development Rules
 
+## Repository Identity
+
+- This checkout is the `atharva-again/pi` fork, not `earendil-works/pi`.
+- Workspace packages still use the `@earendil-works/*` npm scope for internal compatibility; it does not identify this checkout or imply that changes belong in upstream.
+- Git remote `origin` is this fork; `upstream` is `earendil-works/pi` and is read-only unless the user explicitly asks otherwise.
+- Use this fork's issue and pull-request URLs by default. Do not assume upstream issues, PRs, releases, or services apply to this checkout.
+- Do not create, close, comment on, or otherwise mutate GitHub issues or pull requests unless the user asks.
+
+## Upstream Sync Exclusions
+
+Sync upstream selectively. Do not re-add these fork removals without asking the user:
+
+- `CONTRIBUTING.md` or upstream-only contribution gates and policies, including LGTM/approval requirements or automatic closure of issues and pull requests.
+- The npm audit workflow/check; the user considers it unhelpful.
+- Built-in `/share` and `/bug`, including their upload, gist, report-archive, crash-report-hint, and related UI/helper code. Crash diagnostics remain local.
+- Radius provider, OAuth, relay, and orchestrator integrations.
+- MCP and Codemode features: MCP client/server configuration and management (`mcp.json`, `/mcp`, `pi mcp`), Codemode sandbox/tool support, and MCP-only OAuth scopes. This includes upstream commit `8562bcf66a8eeefdf75ddd231ca9d7aa7d64f86e`; those features are not in this fork's current mainline.
+- Unused upstream prompt shortcuts `.pi/prompts/{cl,is,pr,sa,wr}.md` and helper extensions `.pi/extensions/import-repro.ts` and `.pi/extensions/prompt-url-widget.ts`.
+- Upstream publishing and release automation, version-sync/release-announcement scripts, and release-only workflows. Keep local build and package/distribution validation, including `npm run check:distribution`.
+
+Some upstream commits combine excluded features with general runtime or architecture changes. Do not revert such commits wholesale: omit only the excluded features and review unrelated fixes and architecture changes independently. The user intends to evaluate and potentially adopt the newer architecture once it is stable and trusted. Preserve the durable/Harness work, SQLite session backend, conditional cuts, and telemetry unless the user explicitly asks to change them.
+
 ## Conversational Style
 
 - Keep answers short and concise
@@ -73,7 +95,7 @@ If rebase conflicts occur:
 
 ## Issues and PRs
 
-External PRs do not require prior approval. See `CONTRIBUTING.md` for contribution requirements.
+When working with issues or pull requests, use the fork repository unless the user explicitly identifies an upstream item.
 
 When reviewing PRs:
 
@@ -113,12 +135,12 @@ Rules:
 
 Attribution:
 
-- Internal (from issues): `Fixed foo bar ([#123](https://github.com/earendil-works/pi/issues/123))`
-- External contributions: `Added feature X ([#456](https://github.com/earendil-works/pi/pull/456) by [@username](https://github.com/username))`
+- Internal (from issues): `Fixed foo bar ([#123](https://github.com/atharva-again/pi/issues/123))`
+- External contributions: `Added feature X ([#456](https://github.com/atharva-again/pi/pull/456) by [@username](https://github.com/username))`
 
 ## Releasing
 
-This fork does not publish npm packages, release binaries, or GitHub releases. Do not run the release version scripts, create release tags, or publish packages from this repository.
+This fork does not publish npm packages, binary releases, or GitHub releases. Do not create release tags or publish packages from this repository.
 
 ## User Override
 
