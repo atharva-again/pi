@@ -5,9 +5,9 @@ import { writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { getSupportedThinkingLevels, type ImageContent } from "@earendil-works/pi-ai";
+import { type DocumentContent, getSupportedThinkingLevels, type ImageContent } from "@earendil-works/pi-ai";
 import type {
-	AgentSessionEvent,
+	RpcAgentSessionEvent,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
@@ -18,6 +18,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import { getImageDimensions } from "@earendil-works/pi-tui";
 import type { TelegramBotConfig } from "./config.ts";
+import { downloadPdfDocument, isPdfDocument } from "./media.ts";
 import { type ConversationRef, listRecentSessions, PiConversationManager, resolveSessionPath } from "./pi-manager.ts";
 import { TelegramBindingStore } from "./store.ts";
 import {
@@ -46,6 +47,7 @@ interface StreamingState {
 	statusMessageId?: number;
 	lastPreviewAt: number;
 	lastText: string;
+	previewTextBlocks: Map<number, string>;
 	typingInterval?: NodeJS.Timeout;
 }
 
@@ -65,10 +67,7 @@ type ScopedModel = Extract<
 	RpcResponse,
 	{ success: true; command: "get_scoped_models" }
 >["data"]["scopedModels"][number];
-type AgentEventMessage = Extract<
-	AgentSessionEvent,
-	{ type: "message_end" | "message_start" | "message_update" }
->["message"];
+type AgentEventMessage = Extract<RpcAgentSessionEvent, { type: "message_end" | "message_start" }>["message"];
 type AssistantEventMessage = Extract<AgentEventMessage, { role: "assistant" }>;
 type DynamicCommand = Extract<RpcResponse, { success: true; command: "get_commands" }>["data"]["commands"][number];
 type DynamicCommandMenu = {
@@ -733,7 +732,7 @@ export class TelegramPiBot {
 		});
 	}
 
-	private enqueueAgentEvent(conversation: ConversationRef, event: AgentSessionEvent): void {
+	private enqueueAgentEvent(conversation: ConversationRef, event: RpcAgentSessionEvent): void {
 		const previous = this.eventQueues.get(conversation.key) ?? Promise.resolve();
 		const next = previous
 			.catch(() => {})
@@ -1027,6 +1026,8 @@ export class TelegramPiBot {
 		}
 		const text = message.text ?? message.caption ?? "";
 		const hasImage = message.photo !== undefined || isImageDocument(message.document);
+		const pdfDocument = isPdfDocument(message.document) ? message.document : undefined;
+		const hasPdf = pdfDocument !== undefined && !hasImage;
 		if (!text.trim() && !message.document && !hasImage) {
 			return;
 		}
@@ -1039,7 +1040,7 @@ export class TelegramPiBot {
 			await this.handleCommand(conversation, message, parts.command, parts.args);
 			return;
 		}
-		if (message.document && !hasImage) {
+		if (message.document && !hasImage && !hasPdf) {
 			await this.sendText(conversation, "Send /import first, then upload a .jsonl session file.", true);
 			return;
 		}
@@ -1055,19 +1056,29 @@ export class TelegramPiBot {
 			return;
 		}
 		let images: ImageContent[] | undefined;
-		if (hasImage) {
-			try {
+		let documents: DocumentContent[] | undefined;
+		try {
+			if (hasImage) {
 				images = await this.downloadMessageImages(message);
-			} catch (error) {
-				await this.sendText(conversation, `Image download failed: ${formatError(error)}`, true);
-				return;
 			}
-		}
-		const prompt = this.cleanBotMention(text) || (images?.length ? "Please analyze the attached image." : "");
-		if (!prompt && !images?.length) {
+			if (hasPdf && pdfDocument) {
+				documents = [await downloadPdfDocument(this.api, pdfDocument, `telegram-${message.message_id}.pdf`)];
+			}
+		} catch (error) {
+			await this.sendText(conversation, `Attachment download failed: ${formatError(error)}`, true);
 			return;
 		}
-		const error = await this.manager.prompt(conversation, prompt, images);
+		const prompt =
+			this.cleanBotMention(text) ||
+			(images?.length
+				? "Please analyze the attached image."
+				: documents?.length
+					? "Please analyze the attached PDF."
+					: "");
+		if (!prompt && !images?.length && !documents?.length) {
+			return;
+		}
+		const error = await this.manager.prompt(conversation, prompt, images, documents);
 		if (error) {
 			await this.sendText(conversation, `Error: ${redactToken(error)}`, true);
 			return;
@@ -2932,23 +2943,42 @@ export class TelegramPiBot {
 		});
 	}
 
-	private async handleAgentEvent(conversation: ConversationRef, event: AgentSessionEvent): Promise<void> {
+	private async handleAgentEvent(conversation: ConversationRef, event: RpcAgentSessionEvent): Promise<void> {
 		switch (event.type) {
 			case "agent_start":
 				this.streaming.set(conversation.key, {
 					lastPreviewAt: 0,
 					lastText: "",
+					previewTextBlocks: new Map(),
 				});
 				this.startTypingIndicator(conversation);
 				await this.updateStatus(conversation, "Working…");
 				return;
 			case "tool_execution_start":
 				return;
-			case "message_update":
-				if (event.message.role === "assistant" && event.message.stopReason !== "toolUse") {
-					await this.updateAssistantPreview(conversation, extractMessageText(event.message));
+			case "message_start":
+				if (event.message.role === "assistant") {
+					this.streaming.get(conversation.key)?.previewTextBlocks.clear();
 				}
 				return;
+			case "message_update": {
+				const update = event.assistantMessageEvent;
+				if (update.type !== "text_delta" && update.type !== "text_end") return;
+				const state = this.streaming.get(conversation.key);
+				if (!state) return;
+				state.previewTextBlocks.set(
+					update.contentIndex,
+					update.type === "text_end"
+						? update.content
+						: (state.previewTextBlocks.get(update.contentIndex) ?? "") + update.delta,
+				);
+				const text = [...state.previewTextBlocks.entries()]
+					.sort(([a], [b]) => a - b)
+					.map(([, block]) => block)
+					.join("\n");
+				await this.updateAssistantPreview(conversation, text);
+				return;
+			}
 			case "message_end":
 				if (event.message.role === "assistant") {
 					await this.finishAssistantMessage(conversation, event.message);
@@ -2989,7 +3019,7 @@ export class TelegramPiBot {
 		};
 		let state = this.streaming.get(conversation.key);
 		if (!state) {
-			state = { lastPreviewAt: 0, lastText: "" };
+			state = { lastPreviewAt: 0, lastText: "", previewTextBlocks: new Map() };
 			this.streaming.set(conversation.key, state);
 			this.startTypingIndicator(conversation);
 		}
@@ -3035,7 +3065,7 @@ export class TelegramPiBot {
 		}
 		let state = this.streaming.get(conversation.key);
 		if (!state) {
-			state = { lastPreviewAt: 0, lastText: "" };
+			state = { lastPreviewAt: 0, lastText: "", previewTextBlocks: new Map() };
 			this.streaming.set(conversation.key, state);
 			this.startTypingIndicator(conversation);
 		}

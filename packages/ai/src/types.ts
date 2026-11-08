@@ -432,6 +432,13 @@ export interface ImageContent {
 	mimeType: string; // e.g., "image/jpeg", "image/png"
 }
 
+export interface DocumentContent {
+	type: "document";
+	data: string; // base64 encoded document data
+	mimeType: string; // e.g., "application/pdf"
+	filename?: string;
+}
+
 export interface ToolCall {
 	type: "toolCall";
 	id: string;
@@ -562,7 +569,7 @@ export interface SystemMessage {
 
 export interface UserMessage {
 	role: "user";
-	content: string | (TextContent | ImageContent)[];
+	content: string | (TextContent | ImageContent | DocumentContent)[];
 	timestamp: number; // Unix timestamp in milliseconds
 }
 

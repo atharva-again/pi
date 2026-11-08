@@ -27,7 +27,7 @@ import {
 } from "../../core/output-guard.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 import { type Theme, theme } from "../interactive/theme/theme.ts";
-import { toJsonEvent } from "../json-event.ts";
+import { toRpcEvent } from "../json-event.ts";
 import { attachJsonlLineReader, serializeJsonLine } from "./jsonl.ts";
 import type {
 	RpcCommand,
@@ -353,7 +353,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 		unsubscribe?.();
 		unsubscribeBackpressure?.();
 		unsubscribe = session.subscribe((event) => {
-			output(toJsonEvent(event));
+			output(toRpcEvent(event));
 			if (event.type === "agent_settled") {
 				void checkShutdownRequested();
 			}
@@ -398,6 +398,7 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 				void session
 					.prompt(command.message, {
 						images: command.images,
+						documents: command.documents,
 						streamingBehavior: command.streamingBehavior,
 						source: "rpc",
 						preflightResult: (disposition) => {
@@ -414,12 +415,18 @@ export async function runRpcMode(runtimeHost: AgentSessionRuntime): Promise<neve
 			}
 
 			case "steer": {
-				const disposition = await session.steer(command.message, command.images, { source: "rpc" });
+				const disposition = await session.steer(command.message, command.images, {
+					source: "rpc",
+					documents: command.documents,
+				});
 				return success(id, "steer", { disposition });
 			}
 
 			case "follow_up": {
-				const disposition = await session.followUp(command.message, command.images, { source: "rpc" });
+				const disposition = await session.followUp(command.message, command.images, {
+					source: "rpc",
+					documents: command.documents,
+				});
 				return success(id, "follow_up", { disposition });
 			}
 

@@ -414,6 +414,7 @@ export {
 	type JsonAgentSessionEvent,
 	type ModelInfo,
 	type PrintModeOptions,
+	type RpcAgentSessionEvent,
 	RpcClient,
 	type RpcClientOptions,
 	type RpcCommand,

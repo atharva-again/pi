@@ -1,4 +1,4 @@
-import type { AgentSessionEvent } from "@earendil-works/pi-coding-agent";
+import type { RpcAgentSessionEvent } from "@earendil-works/pi-coding-agent";
 
 const TELEGRAM_MESSAGE_LIMIT = 4096;
 const SAFE_MESSAGE_LIMIT = 3900;
@@ -97,7 +97,7 @@ export function splitTelegramText(text: string): string[] {
 }
 
 export function extractMessageText(
-	message: Extract<AgentSessionEvent, { type: "message_end" | "message_update" | "message_start" }>["message"],
+	message: Extract<RpcAgentSessionEvent, { type: "message_end" | "message_start" }>["message"],
 ): string {
 	if (!("content" in message)) {
 		return "";

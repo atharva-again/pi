@@ -4,6 +4,7 @@
 
 import type { AgentMessage, AgentTool } from "@earendil-works/pi-agent-core";
 import {
+	type DocumentContent,
 	getCurrentSystemMessage,
 	type ImageContent,
 	type Model,
@@ -30,7 +31,6 @@ import type {
 	BeforeAgentStartCustomEvent,
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
-	BeforeAgentStartUserEvent,
 	BeforeProviderHeadersEvent,
 	BeforeProviderRequestEvent,
 	BoundaryContextPreview,
@@ -167,7 +167,12 @@ function isUserBashEventResult(value: unknown): value is UserBashEventResult {
 
 /** The message that starts a run: the before_agent_start event without its prompt fields. */
 export type BeforeAgentStartTrigger =
-	| Pick<BeforeAgentStartUserEvent, "messageType" | "prompt" | "images">
+	| {
+			messageType: "user";
+			prompt: string;
+			images?: ImageContent[];
+			documents?: DocumentContent[];
+	  }
 	| Pick<BeforeAgentStartCustomEvent, "messageType" | "message">;
 
 /** Combined result from all before_agent_start handlers. */
@@ -1413,12 +1418,16 @@ export class ExtensionRunner {
 			return renderCurrentSystemPrompt();
 		};
 		const messages: NonNullable<BeforeAgentStartEventResult["message"]>[] = [];
+		const eventTrigger =
+			trigger.messageType === "user"
+				? { messageType: "user" as const, prompt: trigger.prompt, images: trigger.images }
+				: trigger;
 
 		for (const { ext, handlers } of snapshotEventHandlers(this.extensions, "before_agent_start")) {
 			for (const handler of handlers) {
 				try {
 					const event: BeforeAgentStartEvent = {
-						...trigger,
+						...eventTrigger,
 						type: "before_agent_start",
 						get systemPrompt() {
 							return renderCurrentSystemPrompt();

@@ -5,6 +5,7 @@ import type {
 	ResponseCreateParamsStreaming,
 	ResponseInput,
 	ResponseInputContent,
+	ResponseInputFile,
 	ResponseInputImage,
 	ResponseInputItem,
 	ResponseInputText,
@@ -257,11 +258,18 @@ export function convertResponsesMessages<TApi extends Api>(
 							text: sanitizeSurrogates(item.text),
 						} satisfies ResponseInputText;
 					}
+					if (item.type === "image") {
+						return {
+							type: "input_image",
+							detail: "auto",
+							image_url: `data:${item.mimeType};base64,${item.data}`,
+						} satisfies ResponseInputImage;
+					}
 					return {
-						type: "input_image",
-						detail: "auto",
-						image_url: `data:${item.mimeType};base64,${item.data}`,
-					} satisfies ResponseInputImage;
+						type: "input_file",
+						file_data: `data:${item.mimeType};base64,${item.data}`,
+						...(item.filename ? { filename: item.filename } : {}),
+					} satisfies ResponseInputFile;
 				});
 				if (content.length === 0) continue;
 				messages.push({

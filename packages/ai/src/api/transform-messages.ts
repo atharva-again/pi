@@ -1,6 +1,7 @@
 import type {
 	Api,
 	AssistantMessage,
+	DocumentContent,
 	ImageContent,
 	Message,
 	Model,
@@ -8,6 +9,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
+import { supportsPdfInput } from "../utils/document-support.ts";
 
 const NON_VISION_USER_IMAGE_PLACEHOLDER = "(image omitted: model does not support images)";
 const NON_VISION_TOOL_IMAGE_PLACEHOLDER = "(tool image omitted: model does not support images)";
@@ -39,8 +41,16 @@ export function splitErrorToolResultImages(msg: ToolResultMessage): SplitErrorTo
 	};
 }
 
-function replaceImagesWithPlaceholder(content: (TextContent | ImageContent)[], placeholder: string): TextContent[] {
-	const result: TextContent[] = [];
+function replaceImagesWithPlaceholder(content: (TextContent | ImageContent)[], placeholder: string): TextContent[];
+function replaceImagesWithPlaceholder(
+	content: (TextContent | ImageContent | DocumentContent)[],
+	placeholder: string,
+): (TextContent | DocumentContent)[];
+function replaceImagesWithPlaceholder(
+	content: (TextContent | ImageContent | DocumentContent)[],
+	placeholder: string,
+): (TextContent | DocumentContent)[] {
+	const result: (TextContent | DocumentContent)[] = [];
 	let previousWasPlaceholder = false;
 
 	for (const block of content) {
@@ -53,7 +63,7 @@ function replaceImagesWithPlaceholder(content: (TextContent | ImageContent)[], p
 		}
 
 		result.push(block);
-		previousWasPlaceholder = block.text === placeholder;
+		previousWasPlaceholder = block.type === "text" && block.text === placeholder;
 	}
 
 	return result;
@@ -83,6 +93,34 @@ function downgradeUnsupportedImages<TApi extends Api>(messages: Message[], model
 	});
 }
 
+function downgradeUnsupportedDocuments<TApi extends Api>(messages: Message[], model: Model<TApi>): Message[] {
+	for (const message of messages) {
+		if (message.role !== "user" || typeof message.content === "string") continue;
+		for (const block of message.content) {
+			if (block.type !== "document") continue;
+			if (block.mimeType !== "application/pdf") {
+				throw new Error("Native document input currently supports PDF files only.");
+			}
+		}
+	}
+
+	if (supportsPdfInput(model)) return messages;
+	return messages.map((message) => {
+		if (message.role !== "user" || typeof message.content === "string") return message;
+		return {
+			...message,
+			content: message.content.map((block) =>
+				block.type === "document"
+					? {
+							type: "text" as const,
+							text: `(PDF omitted: model does not support PDFs): ${block.filename ?? "attachment"}`,
+						}
+					: block,
+			),
+		};
+	});
+}
+
 /**
  * Normalize tool call ID for cross-provider compatibility.
  * OpenAI Responses API generates IDs that are 450+ chars with special characters like `|`.
@@ -98,7 +136,8 @@ export function transformMessages<TApi extends Api>(
 	// Normalize null/undefined content from untyped callers (custom tools, hand-built
 	// histories, old session files) so downstream code can rely on the type contract.
 	const normalizedMessages = messages.map((msg) => (msg.content == null ? { ...msg, content: [] } : msg));
-	const imageAwareMessages = downgradeUnsupportedImages(normalizedMessages, model);
+	const compatibleMessages = downgradeUnsupportedDocuments(normalizedMessages, model);
+	const imageAwareMessages = downgradeUnsupportedImages(compatibleMessages, model);
 
 	// First pass: transform messages (unsupported image downgrade, thinking blocks, tool call ID normalization)
 	const transformed = imageAwareMessages.map((msg) => {
