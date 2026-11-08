@@ -35,6 +35,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Build Telegram package
+        run: npm run build --workspace=@atharva-again/pi-tg
+
       - name: Check
         run: npm run check
 

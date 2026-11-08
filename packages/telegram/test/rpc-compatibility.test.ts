@@ -45,10 +45,12 @@ describe("Telegram coding-agent RPC compatibility", () => {
 		testDirectories.push(testDirectory);
 		const agentDirectory = join(testDirectory, "agent");
 		const workspace = join(testDirectory, "workspace");
+		const importedWorkspace = join(testDirectory, "imported-workspace");
 		const sessionDirectory = join(testDirectory, "sessions");
 		const exportPath = join(testDirectory, "session.jsonl");
 		mkdirSync(agentDirectory, { recursive: true });
 		mkdirSync(workspace, { recursive: true });
+		mkdirSync(importedWorkspace, { recursive: true });
 
 		const previousAgentDirectory = process.env.PI_CODING_AGENT_DIR;
 		process.env.PI_CODING_AGENT_DIR = agentDirectory;
@@ -80,13 +82,14 @@ describe("Telegram coding-agent RPC compatibility", () => {
 			const imported = await sendWithTimeout(rpc, {
 				type: "import_jsonl",
 				inputPath: exportPath,
-				cwdOverride: workspace,
+				cwdOverride: importedWorkspace,
 			});
 			expectSuccess(imported, "import_jsonl");
 			expect(imported.data.cancelled).toBe(false);
 
 			const stateBeforeRefresh = await sendWithTimeout(rpc, { type: "get_state" });
 			expectSuccess(stateBeforeRefresh, "get_state");
+			expect(stateBeforeRefresh.data.cwd).toBe(importedWorkspace);
 			const sessionFile = stateBeforeRefresh.data.sessionFile;
 			expect(sessionFile).toBeDefined();
 			if (!sessionFile) throw new Error("Expected a saved session file after import");
