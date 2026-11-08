@@ -31,10 +31,11 @@ import {
 	runToolCall,
 	type ThinkingLevel,
 } from "@earendil-works/pi-agent-core";
-import { contentText, getCurrentSystemMessage, retryDelayMs } from "@earendil-works/pi-ai";
+import { contentText, getCurrentSystemMessage, retryDelayMs, supportsPdfInput } from "@earendil-works/pi-ai";
 import type {
 	AssistantMessage,
 	AuthResult,
+	DocumentContent,
 	ImageContent,
 	Model,
 	ProviderHeaders,
@@ -314,6 +315,8 @@ export interface PromptOptions {
 	expandPromptTemplates?: boolean;
 	/** Image attachments */
 	images?: ImageContent[];
+	/** Native document attachments */
+	documents?: DocumentContent[];
 	/** When streaming, how to queue the message: "steer" (interrupt) or "followUp" (wait). Required if streaming. */
 	streamingBehavior?: "steer" | "followUp";
 	/** Source of input for extension input event handlers. Defaults to "interactive". */
@@ -1950,6 +1953,7 @@ export class AgentSession {
 		if (trigger.messageType === "custom") {
 			messages.push(trigger.message);
 		} else {
+			this._assertDocumentInputSupported(trigger.documents);
 			// Normalize images after before_agent_start so extension-driven model selection
 			// determines the resize profile used for the request and history.
 			const normalized = await this._normalizePromptImages(trigger.images);
@@ -1957,7 +1961,7 @@ export class AgentSession {
 				normalized.hints.length > 0 ? `${trigger.prompt}\n\n${normalized.hints.join("\n")}` : trigger.prompt;
 			messages.push({
 				role: "user",
-				content: [{ type: "text", text }, ...normalized.images],
+				content: [{ type: "text", text }, ...normalized.images, ...(trigger.documents ?? [])],
 				timestamp: Date.now(),
 			});
 		}
@@ -2048,11 +2052,14 @@ export class AgentSession {
 	private async _runInputHandlers(
 		text: string,
 		images: ImageContent[] | undefined,
+		documents: DocumentContent[] | undefined,
 		source: InputSource,
 		streamingBehavior?: "steer" | "followUp",
-	): Promise<{ text: string; images: ImageContent[] | undefined } | undefined> {
+	): Promise<
+		{ text: string; images: ImageContent[] | undefined; documents: DocumentContent[] | undefined } | undefined
+	> {
 		if (!this._extensionRunner.hasHandlers("input")) {
-			return { text, images };
+			return { text, images, documents };
 		}
 
 		const inputResult = await this._extensionRunner.emitInput(text, images, source, streamingBehavior);
@@ -2060,9 +2067,25 @@ export class AgentSession {
 			return undefined;
 		}
 		if (inputResult.action === "transform") {
-			return { text: inputResult.text, images: inputResult.images ?? images };
+			return {
+				text: inputResult.text,
+				images: inputResult.images ?? images,
+				documents,
+			};
 		}
-		return { text, images };
+		return { text, images, documents };
+	}
+
+	private _assertDocumentInputSupported(documents: DocumentContent[] | undefined): void {
+		if (!documents?.length) return;
+		for (const document of documents) {
+			if (document.mimeType !== "application/pdf") {
+				throw new Error("Native document input currently supports PDF files only.");
+			}
+		}
+		if (!this.model || !supportsPdfInput(this.model)) {
+			throw new Error("PDF attachments require an OpenAI Codex subscription model; select one and resend the PDF.");
+		}
 	}
 
 	private async _normalizePromptImages(
@@ -2124,6 +2147,7 @@ export class AgentSession {
 		const processedInput = await this._runInputHandlers(
 			text,
 			options?.images,
+			options?.documents,
 			options?.source ?? "interactive",
 			this.isStreaming ? options?.streamingBehavior : undefined,
 		);
@@ -2131,7 +2155,7 @@ export class AgentSession {
 			preflightResult?.("handled");
 			return;
 		}
-		const { text: currentText, images: currentImages } = processedInput;
+		const { text: currentText, images: currentImages, documents: currentDocuments } = processedInput;
 
 		// Expand skill commands (/skill:name args) and prompt templates (/template args)
 		let expandedText = currentText;
@@ -2148,9 +2172,9 @@ export class AgentSession {
 				);
 			}
 			if (options.streamingBehavior === "followUp") {
-				await this._queueFollowUp(expandedText, currentImages);
+				await this._queueFollowUp(expandedText, currentImages, currentDocuments);
 			} else {
-				await this._queueSteer(expandedText, currentImages);
+				await this._queueSteer(expandedText, currentImages, currentDocuments);
 			}
 			preflightResult?.("queued");
 			return;
@@ -2176,8 +2200,14 @@ export class AgentSession {
 			throw new Error(formatNoApiKeyFoundMessage(this.model.provider));
 		}
 
-		await this._startRun({ messageType: "user", prompt: expandedText, images: currentImages }, () =>
-			preflightResult?.("started"),
+		await this._startRun(
+			{
+				messageType: "user",
+				prompt: expandedText,
+				images: currentImages,
+				documents: currentDocuments,
+			},
+			() => preflightResult?.("started"),
 		);
 	}
 
@@ -2244,6 +2274,7 @@ export class AgentSession {
 	private async _queueUserInput(
 		text: string,
 		images: ImageContent[] | undefined,
+		documents: DocumentContent[] | undefined,
 		behavior: "steer" | "followUp",
 		source: InputSource,
 	): Promise<QueuedInputDisposition> {
@@ -2254,6 +2285,7 @@ export class AgentSession {
 		const processedInput = await this._runInputHandlers(
 			text,
 			images,
+			documents,
 			source,
 			this.isStreaming ? behavior : undefined,
 		);
@@ -2263,9 +2295,9 @@ export class AgentSession {
 		expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
 
 		if (behavior === "steer") {
-			await this._queueSteer(expandedText, processedInput.images);
+			await this._queueSteer(expandedText, processedInput.images, processedInput.documents);
 		} else {
-			await this._queueFollowUp(expandedText, processedInput.images);
+			await this._queueFollowUp(expandedText, processedInput.images, processedInput.documents);
 		}
 		return "queued";
 	}
@@ -2282,9 +2314,9 @@ export class AgentSession {
 	async steer(
 		text: string,
 		images?: ImageContent[],
-		options?: { source?: InputSource },
+		options?: { source?: InputSource; documents?: DocumentContent[] },
 	): Promise<QueuedInputDisposition> {
-		return this._queueUserInput(text, images, "steer", options?.source ?? "interactive");
+		return this._queueUserInput(text, images, options?.documents, "steer", options?.source ?? "interactive");
 	}
 
 	/**
@@ -2298,20 +2330,24 @@ export class AgentSession {
 	async followUp(
 		text: string,
 		images?: ImageContent[],
-		options?: { source?: InputSource },
+		options?: { source?: InputSource; documents?: DocumentContent[] },
 	): Promise<QueuedInputDisposition> {
-		return this._queueUserInput(text, images, "followUp", options?.source ?? "interactive");
+		return this._queueUserInput(text, images, options?.documents, "followUp", options?.source ?? "interactive");
 	}
 
 	/**
 	 * Internal: Queue a steering message (already expanded, no extension command check).
 	 */
-	private async _queueSteer(text: string, images?: ImageContent[]): Promise<void> {
+	private async _queueSteer(text: string, images?: ImageContent[], documents?: DocumentContent[]): Promise<void> {
+		this._assertDocumentInputSupported(documents);
 		this._steeringMessages.push(text);
 		this._emitQueueUpdate();
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+		const content: (TextContent | ImageContent | DocumentContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
+		}
+		if (documents) {
+			content.push(...documents);
 		}
 		this.agent.steer({
 			role: "user",
@@ -2323,12 +2359,16 @@ export class AgentSession {
 	/**
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
 	 */
-	private async _queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
+	private async _queueFollowUp(text: string, images?: ImageContent[], documents?: DocumentContent[]): Promise<void> {
+		this._assertDocumentInputSupported(documents);
 		this._followUpMessages.push(text);
 		this._emitQueueUpdate();
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+		const content: (TextContent | ImageContent | DocumentContent)[] = [{ type: "text", text }];
 		if (images) {
 			content.push(...images);
+		}
+		if (documents) {
+			content.push(...documents);
 		}
 		this.agent.followUp({ role: "user", content, timestamp: Date.now() });
 	}

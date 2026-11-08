@@ -1412,8 +1412,13 @@ function convertMessages(
 							type: "text",
 							text: sanitizeSurrogates(item.text),
 						};
-					} else {
+					} else if (item.type === "image") {
 						return convertImageBlock(item);
+					} else {
+						return {
+							type: "text",
+							text: `(document omitted: this API does not support native documents): ${item.filename ?? "attachment"}`,
+						};
 					}
 				});
 				const filteredBlocks = blocks.filter((b) => {

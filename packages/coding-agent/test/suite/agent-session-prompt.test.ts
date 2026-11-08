@@ -165,6 +165,24 @@ describe("AgentSession prompt characterization", () => {
 		expect(sawImage).toBe(true);
 	});
 
+	it("rejects a new PDF on an unsupported model before adding it to the conversation", async () => {
+		const harness = await createHarness();
+		harnesses.push(harness);
+		const documents = [{ type: "document" as const, data: "JVBERi0xLjQ=", mimeType: "application/pdf" }];
+
+		await expect(harness.session.prompt("review", { documents })).rejects.toThrow(
+			"PDF attachments require an OpenAI Codex subscription model",
+		);
+		await expect(harness.session.steer("review", undefined, { documents })).rejects.toThrow(
+			"PDF attachments require an OpenAI Codex subscription model",
+		);
+		await expect(harness.session.followUp("review", undefined, { documents })).rejects.toThrow(
+			"PDF attachments require an OpenAI Codex subscription model",
+		);
+		expect(harness.session.messages).toEqual([]);
+		expect(harness.session.pendingMessageCount).toBe(0);
+	});
+
 	// Regression test for https://github.com/earendil-works/pi/issues/9631
 	it("uses the model selected by before_agent_start for image normalization", async () => {
 		let strictModel: Model<string> | undefined;

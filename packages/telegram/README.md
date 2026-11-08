@@ -42,7 +42,7 @@ pi-tg
 - Workspace extension, prompt, and skill commands are added to the per-chat slash menu when a Pi runtime is available.
 - `/scoped_models` is the Telegram-safe alias for Pi's `/scoped-models` command.
 - Menu-like commands use inline buttons, confirmations, document upload/download, and per-chat pending prompts.
-- Telegram photos and image documents can be sent to Pi as image attachments; `MEDIA:` image and supported file paths in assistant replies are sent back as native Telegram attachments.
+- Telegram photos and image documents can be sent to Pi as image attachments. PDF documents up to Telegram's 20 MB download limit are passed as original PDF attachments to OpenAI Codex subscription models; other non-image documents are only accepted by `/import` for JSONL sessions. `MEDIA:` image and supported file paths in assistant replies are sent back as native Telegram attachments.
 - Workspace changes are available from `/settings` and `/session` buttons without adding an extra slash command.
 - Normal messages are sent to pi with full tool access as the user running `pi-tg`.
 

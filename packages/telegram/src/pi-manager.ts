@@ -1,8 +1,8 @@
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
-import type { ImageContent } from "@earendil-works/pi-ai";
+import type { DocumentContent, ImageContent } from "@earendil-works/pi-ai";
 import type {
-	AgentSessionEvent,
+	RpcAgentSessionEvent,
 	RpcCommand,
 	RpcExtensionUIRequest,
 	RpcExtensionUIResponse,
@@ -37,7 +37,7 @@ export interface PiConversationManagerOptions {
 	defaultCwd: string;
 	projectTrust: boolean;
 	store: TelegramBindingStore;
-	onEvent: (conversation: ConversationRef, event: AgentSessionEvent) => void;
+	onEvent: (conversation: ConversationRef, event: RpcAgentSessionEvent) => void;
 	onUiRequest: (conversation: ConversationRef, request: RpcExtensionUIRequest) => void;
 	onExit: (conversation: ConversationRef, error?: Error) => void;
 }
@@ -84,7 +84,7 @@ export class PiConversationManager {
 	private readonly defaultCwd: string;
 	private readonly projectTrust: boolean;
 	private readonly store: TelegramBindingStore;
-	private readonly onEvent: (conversation: ConversationRef, event: AgentSessionEvent) => void;
+	private readonly onEvent: (conversation: ConversationRef, event: RpcAgentSessionEvent) => void;
 	private readonly onUiRequest: (conversation: ConversationRef, request: RpcExtensionUIRequest) => void;
 	private readonly onExit: (conversation: ConversationRef, error?: Error) => void;
 	private readonly live = new Map<string, LiveConversation>();
@@ -184,9 +184,20 @@ export class PiConversationManager {
 		return this.syncState(live);
 	}
 
-	async prompt(conversation: ConversationRef, message: string, images?: ImageContent[]): Promise<string | undefined> {
+	async prompt(
+		conversation: ConversationRef,
+		message: string,
+		images?: ImageContent[],
+		documents?: DocumentContent[],
+	): Promise<string | undefined> {
 		const live = await this.getConversation(conversation.chatId, conversation.threadId, conversation.chatType);
-		const response = await live.process.send({ type: "prompt", message, images, streamingBehavior: "steer" });
+		const response = await live.process.send({
+			type: "prompt",
+			message,
+			images,
+			documents,
+			streamingBehavior: "steer",
+		});
 		return responseError(response);
 	}
 

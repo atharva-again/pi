@@ -1,4 +1,5 @@
-import type { Usage } from "@earendil-works/pi-ai";
+import type { AgentMessage } from "@earendil-works/pi-agent-core";
+import type { DocumentContent, ImageContent, TextContent, Usage, UserMessage } from "@earendil-works/pi-ai";
 import type { AgentSessionEvent } from "../core/agent-session.ts";
 
 type WithoutPartial<T> = T extends { partial: unknown } ? Omit<T, "partial"> : T;
@@ -16,6 +17,23 @@ type JsonMessageUpdateEvent = {
 
 /** Session event shape emitted by the JSON and RPC stdout protocols. */
 export type JsonAgentSessionEvent = Exclude<AgentSessionEvent, { type: "message_update" }> | JsonMessageUpdateEvent;
+
+/** Document metadata sent in RPC events when the attachment bytes are omitted. */
+export type RpcDocumentAttachment = Omit<DocumentContent, "data"> & { dataOmitted: true };
+
+type RpcUserMessage = Omit<UserMessage, "content"> & {
+	content: string | (TextContent | ImageContent | RpcDocumentAttachment)[];
+};
+type RpcAgentMessage = Exclude<AgentMessage, { role: "user" }> | RpcUserMessage;
+
+type RpcEvent<T> = T extends { type: "agent_end"; messages: AgentMessage[] }
+	? Omit<T, "messages"> & { messages: RpcAgentMessage[] }
+	: T extends { message: AgentMessage }
+		? Omit<T, "message"> & { message: RpcAgentMessage }
+		: T;
+
+/** RPC event shape; document attachment bytes are excluded from notifications. */
+export type RpcAgentSessionEvent = RpcEvent<JsonAgentSessionEvent>;
 
 function toJsonAssistantMessageEvent(
 	event: MessageUpdateEvent["assistantMessageEvent"],
@@ -58,4 +76,41 @@ export function toJsonEvent(event: AgentSessionEvent): JsonAgentSessionEvent {
 		usage: event.message.usage,
 		assistantMessageEvent: toJsonAssistantMessageEvent(event.assistantMessageEvent),
 	};
+}
+
+function omitDocumentData(message: AgentMessage): RpcAgentMessage {
+	if (message.role === "user") {
+		const content =
+			typeof message.content === "string"
+				? message.content
+				: message.content.map((block) => {
+						if (block.type !== "document") return block;
+						return {
+							type: "document" as const,
+							mimeType: block.mimeType,
+							...(block.filename ? { filename: block.filename } : {}),
+							dataOmitted: true as const,
+						};
+					});
+		return {
+			...message,
+			content,
+		};
+	}
+	return message;
+}
+
+/** Convert an event for RPC without copying document bytes into stdout notifications. */
+export function toRpcEvent(event: AgentSessionEvent): RpcAgentSessionEvent {
+	const jsonEvent = toJsonEvent(event);
+	switch (jsonEvent.type) {
+		case "agent_end":
+			return { ...jsonEvent, messages: jsonEvent.messages.map(omitDocumentData) };
+		case "message_start":
+		case "message_end":
+		case "turn_end":
+			return { ...jsonEvent, message: omitDocumentData(jsonEvent.message) };
+		default:
+			return jsonEvent;
+	}
 }
