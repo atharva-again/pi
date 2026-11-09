@@ -3,6 +3,7 @@ import { Container, Markdown, type MarkdownTheme, MouseRegion, Spacer, Text } fr
 import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
+import type { MermaidMarkdownCodeBlockRendererFactory } from "./mermaid.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -18,6 +19,7 @@ export class AssistantMessageComponent extends Container {
 	private hiddenThinkingLabel: string;
 	private outputPad: number;
 	private markdownTransformers: readonly MarkdownTransformer[];
+	private mermaidRendererFactory?: MermaidMarkdownCodeBlockRendererFactory;
 	private lastMessage?: AssistantMessage;
 	private hasToolCalls = false;
 	private isStreaming = false;
@@ -30,6 +32,7 @@ export class AssistantMessageComponent extends Container {
 		hiddenThinkingLabel = "Thinking...",
 		outputPad = 1,
 		markdownTransformers: readonly MarkdownTransformer[] = [],
+		mermaidRendererFactory?: MermaidMarkdownCodeBlockRendererFactory,
 	) {
 		super();
 
@@ -38,6 +41,7 @@ export class AssistantMessageComponent extends Container {
 		this.hiddenThinkingLabel = hiddenThinkingLabel;
 		this.outputPad = outputPad;
 		this.markdownTransformers = markdownTransformers;
+		this.mermaidRendererFactory = mermaidRendererFactory;
 
 		// Container for text/thinking content
 		this.contentContainer = new Container();
@@ -113,6 +117,7 @@ export class AssistantMessageComponent extends Container {
 				this.contentContainer.addChild(
 					new Markdown(content.text.trim(), this.outputPad, 0, this.markdownTheme, undefined, {
 						transform: createMarkdownTransform("assistant", this.isStreaming, this.markdownTransformers),
+						renderCodeBlock: this.mermaidRendererFactory?.(this.isStreaming),
 					}),
 				);
 			} else if (content.type === "thinking") {

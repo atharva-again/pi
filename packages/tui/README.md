@@ -668,7 +668,7 @@ interface ImageTheme {
 
 interface ImageOptions {
   maxWidthCells?: number;
-  maxHeightCells?: number;
+  maxHeightCells?: number | null; // null disables the default height cap
   filename?: string;
 }
 

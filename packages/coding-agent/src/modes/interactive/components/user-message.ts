@@ -2,6 +2,7 @@ import { Container, Markdown, type MarkdownTheme } from "@earendil-works/pi-tui"
 import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
 import { getMarkdownTheme, theme } from "../theme/theme.ts";
 import { createMarkdownTransform } from "./markdown-transform.ts";
+import type { MermaidMarkdownCodeBlockRendererFactory } from "./mermaid.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
 const OSC133_ZONE_END = "\x1b]133;B\x07";
@@ -15,18 +16,21 @@ export class UserMessageComponent extends Container {
 	private markdownTheme: MarkdownTheme;
 	private outputPad: number;
 	private markdownTransformers: readonly MarkdownTransformer[];
+	private mermaidRendererFactory?: MermaidMarkdownCodeBlockRendererFactory;
 
 	constructor(
 		text: string,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
 		outputPad = 1,
 		markdownTransformers: readonly MarkdownTransformer[] = [],
+		mermaidRendererFactory?: MermaidMarkdownCodeBlockRendererFactory,
 	) {
 		super();
 		this.text = text;
 		this.markdownTheme = markdownTheme;
 		this.outputPad = outputPad;
 		this.markdownTransformers = markdownTransformers;
+		this.mermaidRendererFactory = mermaidRendererFactory;
 		this.rebuild();
 	}
 
@@ -53,6 +57,7 @@ export class UserMessageComponent extends Container {
 					preserveOrderedListMarkers: true,
 					preserveBackslashEscapes: true,
 					transform: createMarkdownTransform("user", false, this.markdownTransformers),
+					renderCodeBlock: this.mermaidRendererFactory?.(false, { paddingX: this.outputPad }),
 				},
 			),
 		);

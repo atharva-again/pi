@@ -594,6 +594,26 @@ describe("Kitty image cursor movement", () => {
 		}
 	});
 
+	it("preserves an Image component's natural height when the cap is disabled", () => {
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		setCellDimensions({ widthPx: 10, heightPx: 20 });
+		try {
+			const image = new Image(
+				"AAAA",
+				"image/png",
+				{ fallbackColor: (value) => value },
+				{ maxWidthCells: 10, maxHeightCells: null },
+				{ widthPx: 10, heightPx: 100 },
+			);
+			const lines = image.render(12);
+			assert.strictEqual(lines.length, 50);
+			assert.ok(lines[0].includes(",c=10,r=50"));
+		} finally {
+			resetCapabilitiesCache();
+			setCellDimensions({ widthPx: 9, heightPx: 18 });
+		}
+	});
+
 	it("places image sequence on first line with empty padding rows", () => {
 		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 		setCellDimensions({ widthPx: 10, heightPx: 10 });

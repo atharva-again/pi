@@ -1,6 +1,8 @@
+import { resetCapabilitiesCache, setCapabilities } from "@earendil-works/pi-tui";
 import { describe, expect, test } from "vitest";
+import { createMermaidMarkdownCodeBlockRendererFactory } from "../src/modes/interactive/components/mermaid.ts";
 import { UserMessageComponent } from "../src/modes/interactive/components/user-message.ts";
-import { initTheme } from "../src/modes/interactive/theme/theme.ts";
+import { initTheme, theme } from "../src/modes/interactive/theme/theme.ts";
 import { stripAnsi } from "../src/utils/ansi.ts";
 
 const OSC133_ZONE_START = "\x1b]133;A\x07";
@@ -54,5 +56,41 @@ describe("UserMessageComponent", () => {
 		component.invalidate();
 
 		expect(stripAnsi(component.render(80).join("\n"))).toContain("Message after");
+	});
+
+	test("renders a Mermaid image across the user-message panel", () => {
+		initTheme("dark");
+		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
+		try {
+			let showImages = true;
+			const factory = createMermaidMarkdownCodeBlockRendererFactory({
+				getMode: () => "final",
+				getImageSettings: () => ({ showImages, imageWidthCells: 60 }),
+				theme,
+			});
+			const component = new UserMessageComponent(
+				"Before\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\nAfter",
+				undefined,
+				1,
+				[],
+				factory,
+			);
+			const lines = component.render(40);
+			const imageLine = lines.find((line) => line.includes("\x1b_G"));
+
+			expect(imageLine).toContain(",c=40,");
+			expect(lines.some((line) => line.includes("```mermaid"))).toBe(false);
+			expect(lines.some((line) => line.includes("After") && line.includes(theme.getBgAnsi("userMessageBg")))).toBe(
+				true,
+			);
+
+			showImages = false;
+			component.invalidate();
+			const withoutImages = component.render(40);
+			expect(withoutImages.some((line) => line.includes("\x1b_G"))).toBe(false);
+			expect(stripAnsi(withoutImages.join("\n"))).toContain("───▶");
+		} finally {
+			resetCapabilitiesCache();
+		}
 	});
 });

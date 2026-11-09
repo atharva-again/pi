@@ -1,6 +1,6 @@
 import { Marked, type Token, Tokenizer, type TokenizerExtension, type Tokens } from "marked";
 import { renderLatex } from "../latex.ts";
-import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
+import { getCapabilities, getKittyImagePlacementRows, hyperlink, isImageLine } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
 import { applyBackgroundToLine, flattenLines, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 
@@ -224,9 +224,20 @@ export interface MarkdownOptions {
 	preserveBackslashEscapes?: boolean;
 	/** Transform source Markdown before parsing, with the exact width available for content. */
 	transform?: (markdown: string, availableWidth: number) => string;
+	/** Replace a top-level fenced code block with custom terminal lines. */
+	renderCodeBlock?: MarkdownCodeBlockRenderer;
 	/** Render supported LaTeX math expressions as Unicode text (default: true). */
 	renderLatex?: boolean;
 }
+
+export type MarkdownCodeBlockRenderResult =
+	| { type: "rendered"; lines: string[] }
+	| { type: "fallback"; warning?: string };
+
+export type MarkdownCodeBlockRenderer = (
+	token: Tokens.Code,
+	availableWidth: number,
+) => MarkdownCodeBlockRenderResult | undefined;
 
 interface InlineStyleContext {
 	applyText: (text: string) => string;
@@ -316,7 +327,7 @@ export class Markdown implements Component {
 		for (let i = 0; i < tokens.length; i++) {
 			const token = tokens[i];
 			const nextToken = tokens[i + 1];
-			const tokenLines = this.renderToken(token, contentWidth, nextToken?.type);
+			const tokenLines = this.renderToken(token, contentWidth, nextToken?.type, undefined, true);
 			for (const tokenLine of tokenLines) {
 				renderedLines.push(tokenLine);
 			}
@@ -339,10 +350,18 @@ export class Markdown implements Component {
 		const rightMargin = " ".repeat(this.paddingX);
 		const bgFn = this.defaultTextStyle?.bgColor;
 		const contentLines: string[] = [];
+		let reservedImageRows = 0;
 
 		for (const line of wrappedLines) {
+			if (reservedImageRows > 0 && line === "") {
+				contentLines.push("");
+				reservedImageRows--;
+				continue;
+			}
+			reservedImageRows = 0;
 			if (isImageLine(line)) {
 				contentLines.push(line);
+				reservedImageRows = Math.max(0, (getKittyImagePlacementRows(line) ?? 1) - 1);
 				continue;
 			}
 
@@ -466,6 +485,7 @@ export class Markdown implements Component {
 		width: number,
 		nextTokenType?: string,
 		styleContext?: InlineStyleContext,
+		allowCodeBlockRenderer = false,
 	): string[] {
 		const lines: string[] = [];
 
@@ -528,21 +548,31 @@ export class Markdown implements Component {
 			}
 
 			case "code": {
-				const indent = this.theme.codeBlockIndent ?? "  ";
-				lines.push(this.theme.codeBlockBorder(`\`\`\`${token.lang || ""}`));
-				if (this.theme.highlightCode) {
-					const highlightedLines = this.theme.highlightCode(token.text, token.lang);
-					for (const hlLine of highlightedLines) {
-						lines.push(`${indent}${hlLine}`);
-					}
+				const rendered = allowCodeBlockRenderer
+					? this.options.renderCodeBlock?.(token as Tokens.Code, width)
+					: undefined;
+				if (rendered?.type === "rendered") {
+					lines.push(...rendered.lines);
 				} else {
-					// Split code by newlines and style each line
-					const codeLines = token.text.split("\n");
-					for (const codeLine of codeLines) {
-						lines.push(`${indent}${this.theme.codeBlock(codeLine)}`);
+					const indent = this.theme.codeBlockIndent ?? "  ";
+					lines.push(this.theme.codeBlockBorder(`\`\`\`${token.lang || ""}`));
+					if (this.theme.highlightCode) {
+						const highlightedLines = this.theme.highlightCode(token.text, token.lang);
+						for (const hlLine of highlightedLines) {
+							lines.push(`${indent}${hlLine}`);
+						}
+					} else {
+						// Split code by newlines and style each line
+						const codeLines = token.text.split("\n");
+						for (const codeLine of codeLines) {
+							lines.push(`${indent}${this.theme.codeBlock(codeLine)}`);
+						}
+					}
+					lines.push(this.theme.codeBlockBorder("```"));
+					if (rendered?.type === "fallback" && rendered.warning) {
+						lines.push(rendered.warning);
 					}
 				}
-				lines.push(this.theme.codeBlockBorder("```"));
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after code blocks (unless space token follows)
 				}
