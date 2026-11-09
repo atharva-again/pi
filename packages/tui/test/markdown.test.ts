@@ -65,6 +65,61 @@ describe("Markdown component", () => {
 		});
 	});
 
+	describe("Custom code block rendering", () => {
+		it("renders custom lines for top-level fenced blocks without wrapping image sequences", () => {
+			const imageSequence = "\x1b_Ga=T,f=100;encoded-image\x1b\\";
+			const markdown = new Markdown(
+				"```mermaid\nflowchart LR\nA --> B\n```",
+				1,
+				0,
+				defaultMarkdownTheme,
+				undefined,
+				{
+					renderCodeBlock: (token, availableWidth) => {
+						assert.strictEqual(token.lang, "mermaid");
+						assert.strictEqual(availableWidth, 38);
+						return { type: "rendered", lines: [imageSequence, ""] };
+					},
+				},
+			);
+
+			const lines = markdown.render(40);
+
+			assert.ok(lines.includes(imageSequence));
+			assert.ok(!lines.some((line) => line.includes("```mermaid")));
+		});
+
+		it("renders the ordinary code block and warning when a renderer falls back", () => {
+			const markdown = new Markdown("```mermaid\ninvalid diagram\n```", 0, 0, defaultMarkdownTheme, undefined, {
+				renderCodeBlock: () => ({ type: "fallback", warning: "Mermaid diagram not rendered" }),
+			});
+
+			const plainLines = markdown.render(80).map((line) => stripAnsi(line).trimEnd());
+
+			assert.ok(plainLines.some((line) => line.includes("```mermaid")));
+			assert.ok(plainLines.some((line) => line.includes("invalid diagram")));
+			assert.ok(plainLines.some((line) => line.includes("Mermaid diagram not rendered")));
+		});
+
+		it("keeps Kitty image rows empty so a styled message does not overwrite the image", () => {
+			const imageSequence = "\x1b_Ga=T,f=100,c=40,r=3;encoded-image\x1b\\";
+			const markdown = new Markdown(
+				"Before\n\n```mermaid\nflowchart LR\nA --> B\n```\n\nAfter",
+				1,
+				0,
+				defaultMarkdownTheme,
+				{ bgColor: (line) => `\x1b[48;2;17;34;51m${line}\x1b[49m` },
+				{ renderCodeBlock: () => ({ type: "rendered", lines: [imageSequence, "", ""] }) },
+			);
+
+			const lines = markdown.render(40);
+			const imageRow = lines.indexOf(imageSequence);
+			assert.ok(imageRow >= 0);
+			assert.deepStrictEqual(lines.slice(imageRow, imageRow + 3), [imageSequence, "", ""]);
+			assert.ok(lines.some((line) => line.includes("After") && line.includes("\x1b[48;2;17;34;51m")));
+		});
+	});
+
 	describe("Lists", () => {
 		it("should render simple nested list", () => {
 			const markdown = new Markdown(

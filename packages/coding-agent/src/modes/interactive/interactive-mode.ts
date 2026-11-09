@@ -80,7 +80,6 @@ import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
 	ExtensionWidgetOptions,
-	MarkdownTransformer,
 	ProjectTrustContext,
 	UserBashEventResult,
 	WorkingIndicatorOptions,
@@ -141,7 +140,7 @@ import { ExtensionSelectorComponent } from "./components/extension-selector.ts";
 import { FooterComponent, formatTokens } from "./components/footer.ts";
 import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "./components/keybinding-hints.ts";
 import { LoginDialogComponent } from "./components/login-dialog.ts";
-import { createMermaidMarkdownTransformer } from "./components/mermaid.ts";
+import { createMermaidMarkdownCodeBlockRendererFactory } from "./components/mermaid.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
 import {
 	type AuthSelectorProvider,
@@ -538,8 +537,12 @@ export class InteractiveMode {
 	// Thinking block visibility state
 	private hideThinkingBlock = false;
 	private outputPad = 1;
-	private readonly mermaidMarkdownTransformer: MarkdownTransformer = createMermaidMarkdownTransformer({
+	private readonly mermaidMarkdownCodeBlockRendererFactory = createMermaidMarkdownCodeBlockRendererFactory({
 		getMode: () => this.settingsManager.getMermaidRenderingMode(),
+		getImageSettings: () => ({
+			showImages: this.settingsManager.getShowImages(),
+			imageWidthCells: this.settingsManager.getImageWidthCells(),
+		}),
 		theme,
 	});
 
@@ -2220,10 +2223,6 @@ export class InteractiveMode {
 		);
 	}
 
-	private getMarkdownTransformers(): MarkdownTransformer[] {
-		return [this.mermaidMarkdownTransformer, ...this.session.extensionRunner.getMarkdownTransformers()];
-	}
-
 	/**
 	 * Set up keyboard shortcuts registered by extensions.
 	 */
@@ -3499,7 +3498,8 @@ export class InteractiveMode {
 						this.getMarkdownThemeWithSettings(),
 						this.hiddenThinkingLabel,
 						this.outputPad,
-						this.getMarkdownTransformers(),
+						this.session.extensionRunner.getMarkdownTransformers(),
+						this.mermaidMarkdownCodeBlockRendererFactory,
 					);
 					this.streamingMessage = event.message;
 					this.chatContainer.addChild(this.streamingComponent);
@@ -3957,7 +3957,8 @@ export class InteractiveMode {
 								skillBlock.userMessage,
 								this.getMarkdownThemeWithSettings(),
 								this.outputPad,
-								this.getMarkdownTransformers(),
+								this.session.extensionRunner.getMarkdownTransformers(),
+								this.mermaidMarkdownCodeBlockRendererFactory,
 							);
 							this.chatContainer.addChild(userComponent);
 						}
@@ -3966,7 +3967,8 @@ export class InteractiveMode {
 							textContent,
 							this.getMarkdownThemeWithSettings(),
 							this.outputPad,
-							this.getMarkdownTransformers(),
+							this.session.extensionRunner.getMarkdownTransformers(),
+							this.mermaidMarkdownCodeBlockRendererFactory,
 						);
 						this.chatContainer.addChild(userComponent);
 					}
@@ -3983,7 +3985,8 @@ export class InteractiveMode {
 					this.getMarkdownThemeWithSettings(),
 					this.hiddenThinkingLabel,
 					this.outputPad,
-					this.getMarkdownTransformers(),
+					this.session.extensionRunner.getMarkdownTransformers(),
+					this.mermaidMarkdownCodeBlockRendererFactory,
 				);
 				this.chatContainer.addChild(assistantComponent);
 				break;
@@ -4984,6 +4987,8 @@ export class InteractiveMode {
 								child.setShowImages(enabled);
 							}
 						}
+						this.chatContainer.invalidate();
+						this.ui.requestRender();
 					},
 					onImageWidthCellsChange: (width) => {
 						this.settingsManager.setImageWidthCells(width);
@@ -4992,6 +4997,8 @@ export class InteractiveMode {
 								child.setImageWidthCells(width);
 							}
 						}
+						this.chatContainer.invalidate();
+						this.ui.requestRender();
 					},
 					onAutoResizeImagesChange: (enabled) => {
 						this.settingsManager.setImageAutoResize(enabled);

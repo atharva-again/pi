@@ -535,7 +535,7 @@ export class SettingsSelectorComponent extends Container {
 			{
 				id: "mermaid-rendering",
 				label: "Mermaid diagrams",
-				description: "Render Mermaid code blocks as Unicode diagrams",
+				description: "Render Mermaid code blocks as terminal diagrams",
 				currentValue: config.mermaidRenderingMode,
 				values: ["off", "final", "streaming"],
 			},

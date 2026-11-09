@@ -46,7 +46,8 @@ export interface ImageTheme {
 
 export interface ImageOptions {
 	maxWidthCells?: number;
-	maxHeightCells?: number;
+	/** Maximum rendered height; null preserves the image's natural aspect ratio without a height cap. */
+	maxHeightCells?: number | null;
 	filename?: string;
 	/** Kitty image ID. If provided, reuses this ID (for animations/updates). */
 	imageId?: number;
@@ -98,7 +99,8 @@ export class Image implements Component {
 		const maxWidth = Math.max(1, Math.min(width - 2, this.options.maxWidthCells ?? 60));
 		const cellDimensions = getCellDimensions();
 		const defaultMaxHeight = Math.max(1, Math.ceil((maxWidth * cellDimensions.widthPx) / cellDimensions.heightPx));
-		const maxHeight = this.options.maxHeightCells ?? defaultMaxHeight;
+		const maxHeight =
+			this.options.maxHeightCells === null ? undefined : (this.options.maxHeightCells ?? defaultMaxHeight);
 
 		const caps = getCapabilities();
 		let data: string | null = this.base64Data;
