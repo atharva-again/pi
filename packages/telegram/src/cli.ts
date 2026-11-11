@@ -172,7 +172,12 @@ async function runDoctor(config: TelegramBotConfig): Promise<void> {
 	console.log(`Allow all users: ${yesNo(config.allowAllUsers)}`);
 	console.log(`Streaming: ${config.streaming}`);
 	console.log(`Auto-approve project files: ${yesNo(config.projectTrust)}`);
-	const bot = await new TelegramApi(config.token).getMe();
+	console.log(`Telegram Bot API: ${process.env.PI_TELEGRAM_TEST_SERVER === "1" ? "test server" : "production"}`);
+	const bot = await new TelegramApi(
+		config.token,
+		process.env.PI_TELEGRAM_API_BASE_URL || undefined,
+		process.env.PI_TELEGRAM_TEST_SERVER === "1",
+	).getMe();
 	console.log(`Bot: @${bot.username ?? bot.id}`);
 	console.log("\nReady. Start with: pi-tg");
 }

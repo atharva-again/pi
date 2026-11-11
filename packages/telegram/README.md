@@ -35,6 +35,11 @@ PI_TELEGRAM_ALLOWED_USERS=123456789 \
 pi-tg
 ```
 
+Telegram's test environment uses separate accounts and bot tokens. Set
+`PI_TELEGRAM_TEST_SERVER=1` to route Bot API calls through its `/test/` endpoint;
+this enables widget placements and inline widget results that are not available
+on Telegram's production Bot API.
+
 ## Telegram UX
 
 - A normal DM is one pi session by default.
@@ -43,6 +48,8 @@ pi-tg
 - `/scoped_models` is the Telegram-safe alias for Pi's `/scoped-models` command.
 - Menu-like commands use inline buttons, confirmations, document upload/download, and per-chat pending prompts.
 - Telegram photos and image documents can be sent to Pi as image attachments. PDF documents up to Telegram's 20 MB download limit are passed as original PDF attachments to OpenAI Codex subscription models; other non-image documents are only accepted by `/import` for JSONL sessions. `MEDIA:` image and supported file paths in assistant replies are sent back as native Telegram attachments.
+- Ask Pi to create a bespoke webpage, interactive dashboard, or visualization and it can generate and send a self-contained Telegram HTML widget. Widget interactions can run client-side or call back into Pi; Pi can update per-message or shared widget state. New layouts are sent as new widgets.
+- Pi can create and resend shared widgets in private chats, and answer inline queries with generated widget results when inline mode is enabled with @BotFather. Inline results and group/forward placements require Telegram's test environment.
 - Workspace changes are available from `/settings` and `/session` buttons without adding an extra slash command.
 - Normal messages are sent to pi with full tool access as the user running `pi-tg`.
 

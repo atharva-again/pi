@@ -8,6 +8,14 @@ import type {
 	RpcExtensionUIResponse,
 	RpcResponse,
 } from "@earendil-works/pi-coding-agent";
+import { handleTelegramQueryAnswer, type TelegramQueryAnswerHandler } from "./widget-query-channel.ts";
+
+interface RpcProcessOptions {
+	cwd: string;
+	args?: string[];
+	env?: NodeJS.ProcessEnv;
+	onQueryAnswer?: TelegramQueryAnswerHandler;
+}
 
 interface PendingRequest {
 	resolve(response: RpcResponse): void;
@@ -30,19 +38,22 @@ export class RpcProcessInstance {
 	private readonly exitListeners = new Set<(error?: Error) => void>();
 	private uiRequestHandler: ((request: RpcExtensionUIRequest) => void) | undefined;
 
-	constructor(options: { cwd: string; args?: string[] }) {
+	constructor(options: RpcProcessOptions) {
 		this.process = spawn(
 			process.execPath,
 			[fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent/rpc-entry")), ...(options.args ?? [])],
 			{
 				cwd: options.cwd,
-				env: process.env,
-				stdio: ["pipe", "pipe", "pipe"],
+				env: options.env ? { ...process.env, ...options.env } : process.env,
+				stdio: ["pipe", "pipe", "pipe", "ipc"],
 			},
 		);
 		if (!this.process.stdin || !this.process.stdout) {
 			throw new Error("Failed to create RPC process stdio");
 		}
+		this.process.on("message", (message: unknown) => {
+			handleTelegramQueryAnswer(this.process, message, options.onQueryAnswer);
+		});
 		this.attachListeners();
 	}
 
@@ -182,6 +193,6 @@ export class RpcProcessInstance {
 	}
 }
 
-export function createRpcProcessInstance(options: { cwd: string; args?: string[] }): RpcProcessInstance {
+export function createRpcProcessInstance(options: RpcProcessOptions): RpcProcessInstance {
 	return new RpcProcessInstance(options);
 }
