@@ -18,6 +18,7 @@ import {
 	ANTHROPIC_WORKSPACE_ID_ENV,
 } from "../env-api-keys.ts";
 import { calculateCost } from "../models.ts";
+import { registerSessionResourceCleanup } from "../session-resources.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -32,19 +33,25 @@ import type {
 	StreamFunction,
 	StreamOptions,
 	TextContent,
-	ThinkingContent,
 	Tool,
-	ToolCall,
 	ToolResultMessage,
 } from "../types.ts";
 import { appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
+import { withCauseDetail } from "../utils/error-body.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { shortHash } from "../utils/hash.ts";
 import { headersToRecord } from "../utils/headers.ts";
-import { parseJsonWithRepair, parseStreamingJson, parseToolCallArguments } from "../utils/json-parse.ts";
-import { getPiUserAgent } from "../utils/pi-user-agent.ts";
+import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
+import { parseJsonWithRepair } from "../utils/json-parse.ts";
+import {
+	applyOpenRouterReportedCost,
+	isOpenRouterModel,
+	type OpenRouterUsageAccounting,
+} from "../utils/openrouter-cost.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import { ToolCallArgumentsStream } from "../utils/streaming-json.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
 import {
 	getCurrentTools,
@@ -55,11 +62,17 @@ import {
 
 import {
 	getJsonSchemaToolParameters,
+	prefersJsonSchemaStrictSampling,
 	resolveJsonSchemaStrictSampling,
 	type UnsupportedStrictSchemaKeywordCheck,
 } from "./constrained-sampling.ts";
 import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers.ts";
 import { adjustMaxTokensForThinking, buildBaseOptions, clampMaxTokensToContext } from "./simple-options.ts";
+import {
+	hasExceededStrictToolLimits,
+	isStrictToolLimitErrorMessage,
+	markStrictToolLimitsExceeded,
+} from "./strict-tool-limits.ts";
 import { splitErrorToolResultImages, transformMessages } from "./transform-messages.ts";
 
 /**
@@ -93,7 +106,7 @@ function getCacheControl(
 }
 
 // Stealth mode: Mimic Claude Code's tool naming exactly
-const claudeCodeVersion = "2.1.280";
+const claudeCodeVersion = "2.1.322";
 
 // Claude Code 2.x tool names (canonical casing)
 // Source: https://cchistory.mariozechner.at/data/prompts-2.1.11.md
@@ -197,6 +210,7 @@ const SERVER_SIDE_FALLBACK_BETA = "server-side-fallback-2026-07-01";
 const MID_CONVERSATION_OUTPUT_CONFIG_BETA = "mid-conversation-output-config-2026-07-01";
 const THINKING_BINDING_CONTROLS_BETA = "thinking-binding-controls-2026-08-01";
 const INLINE_TOOLS_BETA = "inline-tools-2026-09-15";
+const MESSAGE_THREADS_BETA = "message-threads-2026-08-12";
 
 /**
  * Stable deferred tool declared whenever native tool changes are in use. Anthropic adds
@@ -229,7 +243,232 @@ function getAnthropicCompat(model: Model<"anthropic-messages">) {
 		supportsStrictTools: model.compat?.supportsStrictTools ?? false,
 		supportsMidConvoSystemMessages: model.compat?.supportsMidConvoSystemMessages ?? false,
 		supportsMidConvoToolChanges: model.compat?.supportsMidConvoToolChanges ?? false,
+		// Gateways that drop unknown request fields would silently turn a `continue` into a request
+		// without the earlier conversation, so the default is limited to Anthropic's own endpoint.
+		// Widen or remove this restriction once proxies generally forward the `thread` field.
+		supportsMessageThreads:
+			model.compat?.supportsMessageThreads ??
+			(model.provider === "anthropic" && model.baseUrl.includes("api.anthropic.com")),
 	};
+}
+
+/**
+ * Message threads: the server keeps the conversation of a thread, so a request can continue
+ * from the previous reply and send only the new messages. pi still builds the full request;
+ * `prepareThreadRequest()` compares it with the previous request of the session and sends
+ * only the new part when nothing earlier changed.
+ */
+type ThreadParam = { type: "create" } | { type: "continue"; previous_message_id: string };
+
+/** The pinned SDK types do not include the `thread` request field yet. */
+type ThreadedParams = MessageCreateParamsStreaming & { thread?: ThreadParam };
+
+interface ThreadEntry {
+	/** Number of messages in the last full request as sent plus the converted reply. */
+	prefixCount: number;
+	/** `hashThreadPrefix()` of the request's settings and those messages. */
+	prefixHash: string;
+	/** Id of the reply to continue from. */
+	replyId: string;
+}
+
+/** Per session: where the next request can continue, or "off" after the endpoint rejected threads. */
+const threadState = new Map<string, ThreadEntry | "off">();
+const MAX_THREAD_STATE_ENTRIES = 10_000;
+
+/** Rejections of a `continue` that a new thread fixes: expired, raced, or a fixed setting changed. */
+const NEW_THREAD_ERRORS: ReadonlySet<string> = new Set([
+	"thread_not_found",
+	"thread_already_continued",
+	"thread_continue_in_flight",
+	"thread_fingerprint_mismatch",
+]);
+
+/**
+ * Sets a session's thread state, keeping at most `MAX_THREAD_STATE_ENTRIES` sessions.
+ *
+ * State is normally freed by `cleanupSessionResources(sessionId)` when a session ends, as pi's
+ * coding agent does. The cap bounds memory for library users that never call it, for example a
+ * server passing a new `sessionId` per conversation. Dropping the least recently updated session
+ * is cheap: its thread has most likely expired on the server already (after a few minutes idle),
+ * and otherwise its next request just starts a new thread.
+ */
+function setThreadState(sessionId: string, value: ThreadEntry | "off"): void {
+	// Re-insert so Map order stays oldest-first for the cap.
+	threadState.delete(sessionId);
+	threadState.set(sessionId, value);
+	if (threadState.size > MAX_THREAD_STATE_ENTRIES) {
+		const oldest = threadState.keys().next().value;
+		if (oldest !== undefined) threadState.delete(oldest);
+	}
+}
+
+registerSessionResourceCleanup((sessionId) => {
+	if (sessionId) threadState.delete(sessionId);
+	else threadState.clear();
+});
+
+/**
+ * Hash of everything a `continue` builds on: the settings that must stay the same within a thread
+ * and the messages the server already holds.
+ *
+ * - Settings, as sent: the endpoint (a thread exists on one endpoint only), and the fixed request
+ *   fields. A `continue` omits `system` and `tools` and the server keeps the thread's own, so only
+ *   this check can notice a change to them, including their cache markers. The server rejects
+ *   changes to the other fields with `thread_fingerprint_mismatch`; checking them here saves that
+ *   rejected request. A fixed field missing here costs only that rejection, which also starts a
+ *   new thread.
+ * - Messages, normalized so messages that mean the same to the API hash the same.
+ */
+function hashThreadPrefix(
+	model: Model<"anthropic-messages">,
+	params: MessageCreateParamsStreaming,
+	messages: readonly unknown[],
+): string {
+	const { system, tools, thinking, output_config, tool_choice, betas, fallbacks } = params;
+	const settings = JSON.stringify([
+		model.provider,
+		model.baseUrl,
+		params.model,
+		system,
+		tools,
+		thinking,
+		output_config,
+		tool_choice,
+		betas,
+		fallbacks,
+	]);
+	const conversation = JSON.stringify(messages, (key, value: unknown) => {
+		// Cache markers don't change what a message means, but they move: pi puts one on the newest
+		// message, so the message that had it in the last request has none in this one. Extensions
+		// may add markers anywhere too.
+		if (key === "cache_control") return undefined;
+		// To attach that marker, the newest user message's string content is sent as one text block;
+		// the next request sends the same message as a string: "hi" vs [{ type: "text", text: "hi" }].
+		if (key === "content" && typeof value === "string") return [{ type: "text", text: value }];
+		return value;
+	});
+	return shortHash(settings + conversation);
+}
+
+interface PreparedThreadRequest {
+	sessionId: string;
+	body: ThreadedParams;
+}
+
+function createThreadRequest(sessionId: string, params: MessageCreateParamsStreaming): PreparedThreadRequest {
+	return { sessionId, body: { ...params, thread: { type: "create" } } };
+}
+
+function prepareThreadRequest(
+	model: Model<"anthropic-messages">,
+	sessionId: string,
+	params: MessageCreateParamsStreaming,
+): PreparedThreadRequest | undefined {
+	const state = threadState.get(sessionId);
+	if (state === "off") return undefined;
+	if (
+		state !== undefined &&
+		params.messages.length > state.prefixCount &&
+		hashThreadPrefix(model, params, params.messages.slice(0, state.prefixCount)) === state.prefixHash
+	) {
+		// Each reply can be continued once; deleting also keeps a concurrent request from trying.
+		threadState.delete(sessionId);
+		const { system: _system, tools: _tools, ...rest } = params;
+		return {
+			body: {
+				...rest,
+				messages: params.messages.slice(state.prefixCount),
+				thread: { type: "continue", previous_message_id: state.replyId },
+			},
+			sessionId,
+		};
+	}
+	return createThreadRequest(sessionId, params);
+}
+
+/** The `error_code` Anthropic puts in `error.details` of thread rejections. */
+function getThreadErrorCode(error: InstanceType<typeof Anthropic.APIError>): string | undefined {
+	const body = error.error as { error?: { details?: { error_code?: unknown } } } | undefined;
+	const code = body?.error?.details?.error_code;
+	return typeof code === "string" ? code : undefined;
+}
+
+/**
+ * Sends a thread request. A rejection about the thread (never a started stream) is resent once in
+ * full: as a new thread when the old one can't be continued, or without `thread` when the endpoint
+ * can't use threads, which also turns threads off for the session. Other errors are passed on.
+ * Returns the response and the thread request that produced it, if any.
+ */
+async function sendThreadRequest(
+	thread: PreparedThreadRequest,
+	params: MessageCreateParamsStreaming,
+	send: (body: ThreadedParams) => Promise<Response>,
+	output: AssistantMessage,
+	signal: AbortSignal | undefined,
+): Promise<{ response: Response; thread: PreparedThreadRequest | undefined }> {
+	try {
+		return { response: await send(thread.body), thread };
+	} catch (error) {
+		if (signal?.aborted || !(error instanceof Anthropic.APIError)) throw error;
+		const errorCode = getThreadErrorCode(error);
+		const startNewThread = errorCode !== undefined && NEW_THREAD_ERRORS.has(errorCode);
+		// The endpoint can't use threads: it can't thread this request, or it doesn't know the
+		// `thread` field and rejects it without a code ("thread: Extra inputs are not permitted"),
+		// e.g. with an `anthropic-beta` header that lacks the threads beta.
+		const threadsUnsupported =
+			errorCode === "thread_unsupported_request" ||
+			(errorCode === undefined && error.status === 400 && error.message.includes("thread"));
+		// Any other error (prompt too long, unknown model, strict tool limits, ...) is not about the
+		// thread, and resending would only fail again.
+		if (!startNewThread && !threadsUnsupported) throw error;
+		// Recorded before the resend, so a failed resend keeps it.
+		appendAssistantMessageDiagnostic(output, {
+			type: "anthropic_thread_fallback",
+			timestamp: Date.now(),
+			error: { message: error.message },
+			details: { reason: errorCode ?? String(error.status) },
+		});
+		if (startNewThread) {
+			const created = createThreadRequest(thread.sessionId, params);
+			return { response: await send(created.body), thread: created };
+		}
+		// With the threads beta, a request without `thread` is a normal request.
+		const response = await send(params);
+		setThreadState(thread.sessionId, "off");
+		return { response, thread: undefined };
+	}
+}
+
+/**
+ * Records where the session's next request can continue: after `output`, the clean reply to the
+ * thread request `thread`, whose full request was `params`.
+ */
+function recordThreadReply(
+	model: Model<"anthropic-messages">,
+	thread: PreparedThreadRequest,
+	params: MessageCreateParamsStreaming,
+	output: AssistantMessage,
+	isOAuth: boolean,
+	allowEmptySignature: boolean,
+): void {
+	// `responseModel` is set only when a fallback model answered; the server does not store those
+	// replies, so they cannot be continued.
+	if (output.responseId === undefined || output.responseModel !== undefined) return;
+	// Convert the reply like the next request will, keeping only the assistant message
+	// (transformMessages adds placeholder results for trailing tool calls).
+	const reply = convertMessages(
+		transformMessages([output], model, normalizeToolCallId),
+		isOAuth,
+		undefined,
+		allowEmptySignature,
+	).messages.filter((message) => message.role === "assistant");
+	const prefix = [...params.messages, ...reply];
+	setThreadState(thread.sessionId, {
+		prefixCount: prefix.length,
+		prefixHash: hashThreadPrefix(model, params, prefix),
+		replyId: output.responseId,
+	});
 }
 
 export interface AnthropicOptions extends StreamOptions {
@@ -302,10 +541,6 @@ function mergeHeaders(...headerSources: (ProviderHeaders | undefined)[]): Provid
 		}
 	}
 	return merged;
-}
-
-function mergeClientHeaders(...headerSources: (ProviderHeaders | undefined)[]): ProviderHeaders {
-	return mergeHeaders({ "User-Agent": getPiUserAgent() }, ...headerSources);
 }
 
 function hasHeader(headers: ProviderHeaders | undefined, name: string): boolean {
@@ -578,7 +813,8 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 	options?: AnthropicOptions,
 ): AssistantMessageEventStream => {
 	const stream = new AssistantMessageEventStream();
-	const normalizedContext = resolveTranscript(context, getAnthropicCompat(model).supportsMidConvoSystemMessages);
+	const compat = getAnthropicCompat(model);
+	const normalizedContext = resolveTranscript(context, compat.supportsMidConvoSystemMessages);
 	const currentTools = getCurrentTools(normalizedContext.messages);
 
 	(async () => {
@@ -605,6 +841,12 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			let isOAuth: boolean;
 			let usageModel = model;
 			let inputTransformations: BetaInputTransformation[] | undefined;
+			const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
+			const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
+			// Session whose requests may use threads; undefined when threads don't apply. Sessions where
+			// the endpoint rejected threads ("off") still send the threads beta, which the resend that
+			// turned them off was accepted with; `prepareThreadRequest()` just sends no `thread`.
+			const threadSessionId = compat.supportsMessageThreads ? cacheSessionId : undefined;
 
 			if (options?.client) {
 				client = options.client;
@@ -623,9 +865,6 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					});
 				}
 
-				const cacheRetention = resolveCacheRetention(options?.cacheRetention, options?.env);
-				const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;
-
 				const created = createClient(
 					model,
 					apiKey,
@@ -634,6 +873,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					copilotDynamicHeaders,
 					cacheSessionId,
 					federation,
+					options?.identity,
 				);
 				client = created.client;
 				isOAuth = created.isOAuthToken;
@@ -643,26 +883,39 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 				...(options?.timeoutMs !== undefined ? { timeout: options.timeoutMs } : {}),
 				maxRetries: 0,
 			};
-			let disablePreferredStrictTools = false;
+			const send = (body: ThreadedParams) =>
+				retryProviderRequest(() => client.beta.messages.create(body, requestOptions).asResponse(), {
+					maxRetries: options?.maxRetries,
+					maxRetryDelayMs: options?.maxRetryDelayMs,
+					signal: options?.signal,
+				});
+			let disablePreferredStrictTools = hasExceededStrictToolLimits(options?.sessionId);
 			let response: Response;
+			let params: MessageCreateParamsStreaming;
+			// The thread request that produced the response; undefined when no `thread` was sent.
+			let thread: PreparedThreadRequest | undefined;
 			for (;;) {
 				options?.signal?.throwIfAborted();
-				const built = buildParams(model, normalizedContext, isOAuth, options, disablePreferredStrictTools);
+				const built = buildParams(model, normalizedContext, isOAuth, options, {
+					disablePreferredStrictTools,
+					messageThreads: threadSessionId !== undefined,
+				});
 				if (built.providerThinkingLevel) output.providerThinkingLevel = built.providerThinkingLevel;
-				let params = built.params;
+				params = built.params;
 				const nextParams = await options?.onPayload?.(params, model);
 				if (nextParams !== undefined) {
 					params = { ...(nextParams as MessageCreateParamsStreaming), stream: true };
 				}
+				const prepared =
+					threadSessionId !== undefined && options?.disableContinuation !== true
+						? prepareThreadRequest(model, threadSessionId, params)
+						: undefined;
 				try {
-					response = await retryProviderRequest(
-						() => client.beta.messages.create(params, requestOptions).asResponse(),
-						{
-							maxRetries: options?.maxRetries,
-							maxRetryDelayMs: options?.maxRetryDelayMs,
-							signal: options?.signal,
-						},
-					);
+					const sent = prepared
+						? await sendThreadRequest(prepared, params, send, output, options?.signal)
+						: { response: await send(params), thread: undefined };
+					response = sent.response;
+					thread = sent.thread;
 					break;
 				} catch (error) {
 					// Only downgrade a rejected request, never an already-started stream.
@@ -673,15 +926,12 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 						!(error instanceof Anthropic.APIError) ||
 						error.status !== 400 ||
 						error.type !== "invalid_request_error" ||
-						![
-							"The compiled grammar is too large",
-							"Too many strict tools (",
-							"Schemas contains too many parameters with union types (",
-						].some((message) => error.message.includes(message))
+						!isStrictToolLimitErrorMessage(error.message)
 					) {
 						throw error;
 					}
 					disablePreferredStrictTools = true;
+					markStrictToolLimitsExceeded(options?.sessionId);
 					appendAssistantMessageDiagnostic(output, {
 						type: "anthropic_strict_tools_fallback",
 						timestamp: Date.now(),
@@ -693,8 +943,12 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
-			type Block = (ThinkingContent | TextContent | (ToolCall & { partialJson: string })) & { index: number };
-			const blocks = output.content as Block[];
+			// Stream state per Anthropic block index, kept off the content blocks so it never reaches partials.
+			const openBlocks = new Map<number, { contentIndex: number; arguments?: ToolCallArgumentsStream }>();
+			const openBlock = (anthropicIndex: number) => {
+				const open = openBlocks.get(anthropicIndex);
+				return open === undefined ? undefined : { ...open, block: output.content[open.contentIndex]! };
+			};
 
 			for await (const event of iterateAnthropicEvents(response, options?.signal)) {
 				await options?.onProviderStreamEvent?.(event, model);
@@ -730,97 +984,84 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 						continue;
 					}
 					if (event.content_block.type === "text") {
-						const block: Block = {
-							type: "text",
-							text: event.content_block.text ?? "",
-							index: event.index,
-						};
-						output.content.push(block);
+						output.content.push({ type: "text", text: event.content_block.text ?? "" });
+						openBlocks.set(event.index, { contentIndex: output.content.length - 1 });
 						stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
 					} else if (event.content_block.type === "thinking") {
-						const block: Block = {
+						output.content.push({
 							type: "thinking",
 							thinking: event.content_block.thinking ?? "",
 							thinkingSignature: event.content_block.signature ?? "",
-							index: event.index,
-						};
-						output.content.push(block);
+						});
+						openBlocks.set(event.index, { contentIndex: output.content.length - 1 });
 						stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
 					} else if (event.content_block.type === "redacted_thinking") {
-						const block: Block = {
+						output.content.push({
 							type: "thinking",
 							thinking: "[Reasoning redacted]",
 							thinkingSignature: event.content_block.data,
 							redacted: true,
-							index: event.index,
-						};
-						output.content.push(block);
+						});
+						openBlocks.set(event.index, { contentIndex: output.content.length - 1 });
 						stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
 					} else if (event.content_block.type === "tool_use") {
-						const block: Block = {
+						output.content.push({
 							type: "toolCall",
 							id: event.content_block.id,
 							name: isOAuth
 								? fromClaudeCodeName(event.content_block.name, currentTools)
 								: event.content_block.name,
 							arguments: (event.content_block.input as Record<string, any>) ?? {},
-							partialJson: "",
-							index: event.index,
-						};
-						output.content.push(block);
+						});
+						openBlocks.set(event.index, {
+							contentIndex: output.content.length - 1,
+							arguments: new ToolCallArgumentsStream(),
+						});
 						stream.push({ type: "toolcall_start", contentIndex: output.content.length - 1, partial: output });
 					}
 				} else if (event.type === "content_block_delta") {
+					const open = openBlock(event.index);
 					if (event.delta.type === "text_delta") {
-						const index = blocks.findIndex((b) => b.index === event.index);
-						const block = blocks[index];
-						if (block && block.type === "text") {
-							block.text += event.delta.text;
+						if (open?.block.type === "text") {
+							open.block.text += event.delta.text;
 							stream.push({
 								type: "text_delta",
-								contentIndex: index,
+								contentIndex: open.contentIndex,
 								delta: event.delta.text,
 								partial: output,
 							});
 						}
 					} else if (event.delta.type === "thinking_delta") {
-						const index = blocks.findIndex((b) => b.index === event.index);
-						const block = blocks[index];
-						if (block && block.type === "thinking") {
-							block.thinking += event.delta.thinking;
+						if (open?.block.type === "thinking") {
+							open.block.thinking += event.delta.thinking;
 							stream.push({
 								type: "thinking_delta",
-								contentIndex: index,
+								contentIndex: open.contentIndex,
 								delta: event.delta.thinking,
 								partial: output,
 							});
 						}
 					} else if (event.delta.type === "input_json_delta") {
-						const index = blocks.findIndex((b) => b.index === event.index);
-						const block = blocks[index];
-						if (block && block.type === "toolCall") {
-							block.partialJson += event.delta.partial_json;
-							block.arguments = parseStreamingJson(block.partialJson);
+						if (open?.block.type === "toolCall" && open.arguments !== undefined) {
+							open.block.arguments = open.arguments.append(event.delta.partial_json);
 							stream.push({
 								type: "toolcall_delta",
-								contentIndex: index,
+								contentIndex: open.contentIndex,
 								delta: event.delta.partial_json,
 								partial: output,
 							});
 						}
 					} else if (event.delta.type === "signature_delta") {
-						const index = blocks.findIndex((b) => b.index === event.index);
-						const block = blocks[index];
-						if (block && block.type === "thinking") {
-							block.thinkingSignature = block.thinkingSignature || "";
-							block.thinkingSignature += event.delta.signature;
+						if (open?.block.type === "thinking") {
+							open.block.thinkingSignature = open.block.thinkingSignature || "";
+							open.block.thinkingSignature += event.delta.signature;
 						}
 					}
 				} else if (event.type === "content_block_stop") {
-					const index = blocks.findIndex((b) => b.index === event.index);
-					const block = blocks[index];
-					if (block) {
-						delete (block as any).index;
+					const open = openBlock(event.index);
+					openBlocks.delete(event.index);
+					if (open) {
+						const { block, contentIndex: index } = open;
 						if (block.type === "text") {
 							stream.push({
 								type: "text_end",
@@ -835,11 +1076,8 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 								content: block.thinking,
 								partial: output,
 							});
-						} else if (block.type === "toolCall") {
-							Object.assign(block, parseToolCallArguments(block.partialJson));
-							// Finalize in-place and strip the scratch buffer so replay only
-							// carries parsed arguments.
-							delete (block as { partialJson?: string }).partialJson;
+						} else if (block.type === "toolCall" && open.arguments !== undefined) {
+							Object.assign(block, open.arguments.finish());
 							stream.push({
 								type: "toolcall_end",
 								contentIndex: index,
@@ -891,6 +1129,14 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 					output.usage.totalTokens =
 						output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 					calculateCost(usageModel, output.usage);
+					if (isOpenRouterModel(model) && event.usage) {
+						// OpenRouter adds billing fields to streamed message_delta usage at runtime,
+						// although its OpenAPI schema and the Anthropic SDK do not type those fields.
+						applyOpenRouterReportedCost(
+							output.usage,
+							event.usage as typeof event.usage & OpenRouterUsageAccounting,
+						);
+					}
 				}
 			}
 
@@ -904,6 +1150,7 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			if (output.stopReason === "aborted" || output.stopReason === "error") {
 				throw new Error(output.errorMessage || "An unknown error occurred");
 			}
+			if (thread) recordThreadReply(model, thread, params, output, isOAuth, compat.allowEmptySignature);
 			if (inputTransformations && inputTransformations.length > 0) {
 				appendAssistantMessageDiagnostic(output, {
 					type: "anthropic_input_transformations",
@@ -921,13 +1168,8 @@ export const stream: StreamFunction<"anthropic-messages", AnthropicOptions> = (
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
-			for (const block of output.content) {
-				delete (block as { index?: number }).index;
-				// partialJson is only a streaming scratch buffer; never persist it.
-				delete (block as { partialJson?: string }).partialJson;
-			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
-			output.errorMessage = error instanceof Error ? error.message : JSON.stringify(error);
+			output.errorMessage = error instanceof Error ? withCauseDetail(error) : JSON.stringify(error);
 			stream.push({ type: "error", reason: output.stopReason, error: output });
 			stream.end();
 		}
@@ -1023,6 +1265,7 @@ function createClient(
 	dynamicHeaders?: Record<string, string>,
 	sessionId?: string,
 	federation?: AnthropicFederationConfig,
+	identity?: ClientIdentity,
 ): { client: Anthropic; isOAuthToken: boolean } {
 	// Copilot: Bearer auth.
 	if (model.provider === "github-copilot") {
@@ -1032,7 +1275,8 @@ function createClient(
 			baseURL: model.baseUrl,
 			dangerouslyAllowBrowser: true,
 			fetch,
-			defaultHeaders: mergeClientHeaders(
+			defaultHeaders: mergeHeaders(
+				getIdentityHeaders(model, identity),
 				{
 					accept: "application/json",
 					"anthropic-dangerous-direct-browser-access": "true",
@@ -1046,7 +1290,7 @@ function createClient(
 		return { client, isOAuthToken: false };
 	}
 
-	// OAuth: Bearer auth, Claude Code identity headers
+	// OAuth: Bearer auth, Claude Code identity headers instead of the client identity.
 	if (apiKey && isOAuthToken(apiKey)) {
 		const client = new PiAnthropic({
 			apiKey: null,
@@ -1054,7 +1298,7 @@ function createClient(
 			baseURL: model.baseUrl,
 			dangerouslyAllowBrowser: true,
 			fetch,
-			defaultHeaders: mergeClientHeaders(
+			defaultHeaders: mergeHeaders(
 				{
 					accept: "application/json",
 					"anthropic-dangerous-direct-browser-access": "true",
@@ -1076,7 +1320,8 @@ function createClient(
 		const header = compat.sessionAffinityFormat === "openrouter" ? "x-session-id" : "x-session-affinity";
 		sessionAffinityHeaders[header] = sessionId;
 	}
-	const defaultHeaders = mergeClientHeaders(
+	const defaultHeaders = mergeHeaders(
+		getIdentityHeaders(model, identity),
 		{
 			accept: "application/json",
 			"anthropic-dangerous-direct-browser-access": "true",
@@ -1113,12 +1358,19 @@ function createClient(
 	return { client, isOAuthToken: false };
 }
 
+interface BetaFeatureFlags {
+	isOAuthToken: boolean;
+	/** Tool changes are sent as native `tool_addition` / `tool_removal` blocks. */
+	nativeToolChanges: boolean;
+	/** The session uses message threads. */
+	messageThreads: boolean;
+}
+
 function getBetaFeatures(
 	model: Model<"anthropic-messages">,
 	context: TranscriptContext,
-	isOAuthToken: boolean,
-	nativeToolChanges: boolean,
-	options?: AnthropicOptions,
+	options: AnthropicOptions | undefined,
+	{ isOAuthToken, nativeToolChanges, messageThreads }: BetaFeatureFlags,
 ): NonNullable<MessageCreateParamsStreaming["betas"]> {
 	let configuredFeatures: string | null | undefined;
 	for (const headers of [model.headers, options?.headers]) {
@@ -1154,15 +1406,23 @@ function getBetaFeatures(
 		features.push(MID_CONVERSATION_OUTPUT_CONFIG_BETA, THINKING_BINDING_CONTROLS_BETA);
 	}
 	if (nativeToolChanges) features.push(INLINE_TOOLS_BETA);
+	if (messageThreads) features.push(MESSAGE_THREADS_BETA);
 	return [...new Set(features)];
+}
+
+interface BuildParamsFlags {
+	/** Send `strict: "prefer"` tools without strict schemas, after Anthropic rejected them in this request or session. */
+	disablePreferredStrictTools: boolean;
+	/** The session uses message threads, so the threads beta is sent. */
+	messageThreads: boolean;
 }
 
 function buildParams(
 	model: Model<"anthropic-messages">,
 	context: TranscriptContext,
 	isOAuthToken: boolean,
-	options?: AnthropicOptions,
-	disablePreferredStrictTools = false,
+	options: AnthropicOptions | undefined,
+	flags: BuildParamsFlags,
 ): {
 	params: MessageCreateParamsStreaming;
 	hasPreferredStrictTools: boolean;
@@ -1187,13 +1447,12 @@ function buildParams(
 			compat.supportsEagerToolInputStreaming,
 			compat.supportsStrictTools,
 			toolCacheControl,
-			disablePreferredStrictTools,
+			flags.disablePreferredStrictTools,
 		);
 		if (
-			definitions.some((definition, index) => {
-				const config = tools[index].constrainedSampling;
-				return definition.strict === true && config && config.type === "json_schema" && config.strict === "prefer";
-			})
+			definitions.some(
+				(definition, index) => definition.strict === true && prefersJsonSchemaStrictSampling(tools[index]),
+			)
 		) {
 			hasPreferredStrictTools = true;
 		}
@@ -1215,7 +1474,11 @@ function buildParams(
 		nativeToolChanges ? convertToolDefinitions : undefined,
 	);
 	const activeEffort = options?.effort ?? "high";
-	const betaFeatures = getBetaFeatures(model, context, isOAuthToken, nativeToolChanges, options);
+	const betaFeatures = getBetaFeatures(model, context, options, {
+		isOAuthToken,
+		nativeToolChanges,
+		messageThreads: flags.messageThreads,
+	});
 	const params: MessageCreateParamsStreaming = {
 		model: model.id,
 		messages: effortMessages ? insertThinkingLevelMessages(converted, activeEffort) : converted.messages,
@@ -1287,7 +1550,10 @@ function buildParams(
 			display: options?.thinkingDisplay ?? "summarized",
 			block_binding: { prefix_mismatch_behavior: "drop_block" },
 		};
-		params.output_config = { effort: "high" };
+		// Effort markers set the level for every reply. The top-level effort is part of the cached
+		// prompt, so it stays fixed. It is "low" because organizations can cap effort and reject
+		// requests containing any level above the cap.
+		params.output_config = { effort: "low" };
 	} else if (model.reasoning && options?.thinkingEnabled) {
 		// Default to "summarized" so Opus 4.7 and Mythos Preview behave like
 		// older Claude 4 models (whose API default is also "summarized").
@@ -1362,7 +1628,9 @@ function convertMessages(
 	const params: MessageParam[] = [];
 	const assistantLevels = new Map<number, AnthropicEffort>();
 	// Later system messages are held back and emitted directly before the next assistant
-	// message (or at the end of the transcript). Anthropic requires `tool_result` blocks to
+	// message that is sent (or at the end of the transcript). Assistant messages that convert to
+	// no blocks are dropped, so holding past them keeps an update from landing before a user
+	// message (#11091). Anthropic requires `tool_result` blocks to
 	// immediately follow their `tool_use`, so a system message between them is rejected; this
 	// also mirrors where the managed-effort system messages are inserted. As a result an
 	// update placed before a user message in the transcript lands after it on the wire.
@@ -1434,7 +1702,6 @@ function convertMessages(
 				});
 			}
 		} else if (msg.role === "assistant") {
-			flushPendingSystemMessages();
 			const blocks: ContentBlockParam[] = [];
 
 			for (const block of msg.content) {
@@ -1489,6 +1756,7 @@ function convertMessages(
 				}
 			}
 			if (blocks.length === 0) continue;
+			flushPendingSystemMessages();
 			const messageIndex = params.length;
 			params.push({
 				role: "assistant",
@@ -1635,17 +1903,25 @@ function convertTools(
 	if (!tools) return [];
 
 	return tools.map((tool, index) => {
-		const config = tool.constrainedSampling;
 		const strict =
-			disablePreferredStrictTools && config && config.type === "json_schema" && config.strict === "prefer"
+			disablePreferredStrictTools && prefersJsonSchemaStrictSampling(tool)
 				? undefined
 				: resolveJsonSchemaStrictSampling(tool, supportsStrictTools, isAnthropicStrictUnsupportedKeyword);
 		const parameters = getJsonSchemaToolParameters(tool, strict);
-		const schema = parameters as { properties?: unknown; required?: string[] };
+		const schema = parameters as {
+			properties?: unknown;
+			required?: string[];
+			$defs?: unknown;
+			definitions?: unknown;
+		};
+		// Keep shared definitions so property $refs still resolve. Other root keywords stay out:
+		// Anthropic rejects root anyOf/oneOf/allOf with a 400.
 		const legacyInputSchema = {
 			type: "object" as const,
 			properties: schema.properties ?? {},
 			required: schema.required ?? [],
+			...(schema.$defs === undefined ? {} : { $defs: schema.$defs }),
+			...(schema.definitions === undefined ? {} : { definitions: schema.definitions }),
 		};
 		const inputSchema =
 			strict === true

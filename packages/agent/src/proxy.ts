@@ -3,17 +3,16 @@
  * The server manages auth and proxies requests to LLM providers.
  */
 
-// Internal import for JSON parsing utility
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
 	type AssistantMessageEventStream,
 	createAssistantMessageEventStream,
 	type Model,
-	parseStreamingJson,
 	type SimpleStreamOptions,
 	type StopReason,
 	type ToolCall,
+	ToolCallArgumentsStream,
 	type TranscriptContext,
 } from "@earendil-works/pi-ai";
 
@@ -53,6 +52,7 @@ type ProxySerializableStreamOptions = Pick<
 	| "reasoning"
 	| "cacheRetention"
 	| "sessionId"
+	| "disableContinuation"
 	| "headers"
 	| "metadata"
 	| "transport"
@@ -96,6 +96,7 @@ function buildProxyRequestOptions(options: ProxyStreamOptions): ProxySerializabl
 		reasoning: options.reasoning,
 		cacheRetention: options.cacheRetention,
 		sessionId: options.sessionId,
+		disableContinuation: options.disableContinuation,
 		headers: options.headers,
 		metadata: options.metadata,
 		transport: options.transport,
@@ -175,13 +176,15 @@ export function streamProxy(
 			const decoder = new TextDecoder();
 			let buffer = "";
 			let sawTerminalEvent = false;
+			// Argument streams of open tool calls by content index, kept off the content blocks.
+			const toolArguments = new Map<number, ToolCallArgumentsStream>();
 
 			const processLine = (line: string): void => {
 				if (!line.startsWith("data: ")) return;
 				const data = line.slice(6).trim();
 				if (!data) return;
 				const proxyEvent = JSON.parse(data) as ProxyAssistantMessageEvent;
-				const event = processProxyEvent(proxyEvent, partial);
+				const event = processProxyEvent(proxyEvent, partial, toolArguments);
 				if (event) {
 					if (event.type === "done" || event.type === "error") sawTerminalEvent = true;
 					stream.push(event);
@@ -257,6 +260,7 @@ export function streamProxy(
 function processProxyEvent(
 	proxyEvent: ProxyAssistantMessageEvent,
 	partial: AssistantMessage,
+	toolArguments: Map<number, ToolCallArgumentsStream>,
 ): AssistantMessageEvent | undefined {
 	switch (proxyEvent.type) {
 		case "start":
@@ -332,16 +336,16 @@ function processProxyEvent(
 				id: proxyEvent.id,
 				name: proxyEvent.toolName,
 				arguments: {},
-				partialJson: "",
-			} satisfies ToolCall & { partialJson: string } as ToolCall;
+			};
+			toolArguments.set(proxyEvent.contentIndex, new ToolCallArgumentsStream());
 			return { type: "toolcall_start", contentIndex: proxyEvent.contentIndex, partial };
 
 		case "toolcall_delta": {
 			const content = partial.content[proxyEvent.contentIndex];
-			if (content?.type === "toolCall") {
-				(content as any).partialJson += proxyEvent.delta;
-				content.arguments = parseStreamingJson((content as any).partialJson) || {};
-				partial.content[proxyEvent.contentIndex] = { ...content }; // Trigger reactivity
+			const args = toolArguments.get(proxyEvent.contentIndex);
+			if (content?.type === "toolCall" && args !== undefined) {
+				// A new block object, so reactive consumers see the change.
+				partial.content[proxyEvent.contentIndex] = { ...content, arguments: args.append(proxyEvent.delta) };
 				return {
 					type: "toolcall_delta",
 					contentIndex: proxyEvent.contentIndex,
@@ -356,7 +360,7 @@ function processProxyEvent(
 			const content = partial.content[proxyEvent.contentIndex];
 			if (content?.type === "toolCall") {
 				Object.assign(content, proxyEvent.toolCall);
-				delete (content as any).partialJson;
+				toolArguments.delete(proxyEvent.contentIndex);
 				return {
 					type: "toolcall_end",
 					contentIndex: proxyEvent.contentIndex,

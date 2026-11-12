@@ -1,5 +1,6 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { stripVTControlCharacters } from "node:util";
 
 /** Frame types (docs/protocol.md). */
 const REQUEST = 1;
@@ -15,6 +16,15 @@ const PING_INTERVAL_MS = 5000;
 const SILENCE_LIMIT_MS = 30_000;
 /** How long starting the daemon and its `hello` may take. */
 const START_TIMEOUT_MS = 60_000;
+/**
+ * How long an aborted request waits for the daemon's answer to its cancel before it settles as aborted on its own. A live
+ * daemon answers within a round trip, with its own result (an `exec`'s spill file); a connection that died unnoticed (a
+ * rebooting host) would otherwise hold the request until the keepalive gives up.
+ */
+const ABORT_GRACE_MS = 1000;
+/** How much stderr a startup error shows: short, because a tool error can reach the model. */
+const STDERR_TAIL_CHARS = 2000;
+const STDERR_TAIL_LINES = 20;
 
 export type Json = Record<string, unknown>;
 
@@ -89,7 +99,11 @@ type Pending = {
 
 export interface RequestOptions {
 	payload?: Uint8Array;
-	/** Aborting sends `cancel`; the request still settles with the daemon's result or error. */
+	/**
+	 * Aborting while the connection starts rejects at once with code `aborted` (the start goes on for other requests);
+	 * after the request was sent, it sends `cancel`, and the request settles with the daemon's result or error, or with
+	 * code `aborted` if the daemon does not answer within a second.
+	 */
 	signal?: AbortSignal;
 	/** Progress events of the request, such as `exec` output. */
 	onEvent?: (json: Json, payload: Uint8Array) => void;
@@ -131,6 +145,39 @@ function closed(): RemoteError {
 	return new RemoteError({ code: "unknown", message: "Connection closed" });
 }
 
+function aborted(): RemoteError {
+	return new RemoteError({ code: "aborted", message: "aborted" });
+}
+
+/** `promise`, or a rejection with code `aborted` as soon as `signal` aborts; `promise` itself goes on. */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+	if (signal === undefined) return promise;
+	if (signal.aborted) return Promise.reject(aborted());
+	return new Promise((resolve, reject) => {
+		const onAbort = () => reject(aborted());
+		signal.addEventListener("abort", onAbort, { once: true });
+		promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+	});
+}
+
+/**
+ * `message` plus the last lines of `stderr`. The remote machine wrote that text, so terminal escapes and control
+ * characters are removed.
+ */
+function withStderr(message: string, stderr: string): string {
+	let text = "";
+	for (const char of stripVTControlCharacters(stderr.replace(/\r\n?/g, "\n"))) {
+		const code = char.charCodeAt(0);
+		if (char === "\n" || char === "\t" || (code >= 0x20 && (code < 0x7f || code > 0x9f))) text += char;
+	}
+	const lines = text
+		.split("\n")
+		.map((line) => line.trimEnd())
+		.filter((line) => line !== "");
+	if (lines.length === 0) return message;
+	return `${message}\nremote stderr:\n${lines.slice(-STDERR_TAIL_LINES).join("\n")}`;
+}
+
 /** One running daemon. */
 class Session {
 	readonly id: number;
@@ -144,6 +191,7 @@ class Session {
 	lastSeen = Date.now();
 	timer: ReturnType<typeof setInterval> | undefined;
 	live = true;
+	stderrTail = "";
 
 	constructor(id: number, child: ChildProcessWithoutNullStreams, token: string) {
 		this.id = id;
@@ -190,9 +238,12 @@ export class Connection {
 		this.#options = options;
 	}
 
-	/** Connect if needed and return what the daemon reported about its machine. */
-	async info(): Promise<RemoteInfo> {
-		return (await this.#connect()).info;
+	/**
+	 * Connect if needed and return what the daemon reported about its machine. Aborting `signal` stops waiting for the
+	 * start (code `aborted`), not the start itself.
+	 */
+	async info(signal?: AbortSignal): Promise<RemoteInfo> {
+		return (await untilAborted(this.#connect(), signal)).info;
 	}
 
 	/** Connect if needed and return the live session's id. */
@@ -208,7 +259,7 @@ export class Connection {
 			}
 			return this.#send(current, op, json, options);
 		}
-		const { session } = await this.#connect();
+		const { session } = await untilAborted(this.#connect(), options.signal);
 		return this.#send(session, op, json, options);
 	}
 
@@ -241,9 +292,21 @@ export class Connection {
 		if (!session.live) return Promise.reject(lost("pi-env connection lost"));
 		const id = this.#nextId++;
 		return new Promise((resolve, reject) => {
-			const onAbort = () => this.#write(session, frame(CANCEL, id, {}));
-			const done = () => options.signal?.removeEventListener("abort", onAbort);
-			session.pending.set(id, {
+			let grace: ReturnType<typeof setTimeout> | undefined;
+			const onAbort = () => {
+				this.#write(session, frame(CANCEL, id, {}));
+				grace = setTimeout(() => {
+					// Unanswered: a late answer finds no pending request and is dropped.
+					if (session.pending.get(id) !== pending) return;
+					session.pending.delete(id);
+					pending.reject(aborted());
+				}, ABORT_GRACE_MS);
+			};
+			const done = () => {
+				clearTimeout(grace);
+				options.signal?.removeEventListener("abort", onAbort);
+			};
+			const pending: Pending = {
 				resolve: (value) => {
 					done();
 					resolve(value);
@@ -253,7 +316,8 @@ export class Connection {
 					reject(error);
 				},
 				...(options.onEvent ? { onEvent: options.onEvent } : {}),
-			});
+			};
+			session.pending.set(id, pending);
 			options.signal?.addEventListener("abort", onAbort, { once: true });
 			options.onStart?.(id, session.id);
 			this.#write(session, frame(REQUEST, id, { ...json, op }, options.payload));
@@ -281,6 +345,7 @@ export class Connection {
 		const child = spawn(program, [...args, "serve", "--token", token], { stdio: ["pipe", "pipe", "pipe"] });
 		const session = new Session(++this.#sessions, child, token);
 		this.#session = session;
+		let ready = false;
 		let startTimer: ReturnType<typeof setTimeout> | undefined;
 		const failed = new Promise<never>((_resolve, reject) => {
 			startTimer = setTimeout(
@@ -290,13 +355,20 @@ export class Connection {
 			child.once("error", (error) =>
 				reject(new RemoteError({ code: "spawn_error", message: error.message, lost: true })),
 			);
-			child.once("exit", (code) => reject(lost(`pi-env exited with code ${code} before it was ready`)));
+			child.once("close", (code) => reject(lost(`pi-env exited with code ${code} before it was ready`)));
 		});
 		failed.catch(() => {});
 		child.stdout.on("data", (chunk: Buffer) => this.#onData(session, chunk));
-		child.stderr.on("data", (chunk: Buffer) => this.#options.onLog?.(chunk.toString("utf8")));
+		child.stderr.setEncoding("utf8").on("data", (text: string) => {
+			if (!ready) session.stderrTail = (session.stderrTail + text).slice(-STDERR_TAIL_CHARS);
+			this.#options.onLog?.(text);
+		});
 		child.on("error", () => this.#teardown(session, lost("pi-env connection lost")));
-		child.on("exit", () => this.#teardown(session, lost("pi-env connection lost")));
+		// A ready session fails as soon as the daemon exits, even while a process it started keeps a pipe open.
+		child.on("exit", () => {
+			if (ready) this.#teardown(session, lost("pi-env connection lost"));
+		});
+		child.on("close", () => this.#teardown(session, lost("pi-env connection lost")));
 		child.stdin.on("error", () => {});
 		session.timer = setInterval(() => {
 			this.#write(session, frame(PING, 0, {}));
@@ -308,10 +380,19 @@ export class Connection {
 		try {
 			const { json } = await Promise.race([this.#send(session, "hello", { protocol: 1 }, {}), failed]);
 			if (json.protocol !== 1) throw lost(`Unsupported protocol ${json.protocol}`);
+			ready = true;
+			session.stderrTail = "";
 			return { info: json as unknown as RemoteInfo, session };
 		} catch (error) {
-			this.#teardown(session, error instanceof Error ? error : lost(String(error)));
-			throw error;
+			// Add the captured stderr to whatever ended the start; only a pre-ready exit waits for it to drain.
+			const failure =
+				error instanceof RemoteError
+					? new RemoteError({ ...error.fields, message: withStderr(error.message, session.stderrTail) })
+					: error instanceof Error
+						? error
+						: lost(String(error));
+			this.#teardown(session, failure);
+			throw failure;
 		} finally {
 			clearTimeout(startTimer);
 		}

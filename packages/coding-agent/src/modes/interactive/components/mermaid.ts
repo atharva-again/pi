@@ -5,14 +5,18 @@ import {
 	getCellDimensions,
 	Image,
 	type MarkdownCodeBlockRenderer,
+	Marked,
+	type Token,
 } from "@earendil-works/pi-tui";
 import type { Resvg as ResvgConstructor } from "@resvg/resvg-js";
-import { type MermaidArt, render as renderUnicode, type Span } from "grok-mermaid";
+import { type AnsiTheme, type MermaidArt, render as renderUnicode, toAnsi } from "lovely-mermaid";
 import { render as renderPele } from "pele";
+import type { MarkdownTransformer } from "../../../core/extensions/types.ts";
 import type { MermaidRenderingMode } from "../../../core/settings-manager.ts";
-import type { Theme } from "../theme/theme.ts";
+import type { Theme, ThemeColor } from "../theme/theme.ts";
 
 const require = createRequire(import.meta.url);
+const markdownParser = new Marked();
 
 const MAX_RASTER_DIMENSION = 4096;
 const MAX_RASTER_PIXELS = 12_000_000;
@@ -20,6 +24,12 @@ const MAX_CACHED_PNG_CHARS = 8_000_000;
 const MAX_CACHED_DIAGRAMS = 32;
 const MAX_CACHED_UNICODE_CELLS = 20_000;
 const MAX_CACHED_UNICODE_DIAGRAMS = 16;
+type MermaidTheme = Pick<Theme, "fg" | "getFgAnsi">;
+
+interface MermaidTransformerOptions {
+	getMode: () => MermaidRenderingMode;
+	theme?: MermaidTheme;
+}
 
 interface MermaidRendererOptions {
 	getMode: () => MermaidRenderingMode;
@@ -31,36 +41,6 @@ export type MermaidMarkdownCodeBlockRendererFactory = (
 	isStreaming: boolean,
 	panel?: { paddingX: number },
 ) => MarkdownCodeBlockRenderer;
-
-function styleSpan(span: Span, theme: Theme): string {
-	switch (span.cls) {
-		case "border":
-			return theme.fg("borderMuted", span.text);
-		case "text":
-			return theme.fg("text", span.text);
-		case "edge":
-			return theme.fg("accent", span.text);
-		case "edgeLabel":
-			return theme.fg("muted", span.text);
-		case "title":
-			return theme.fg("accent", theme.bold(span.text));
-		case "none":
-			return span.text;
-	}
-}
-
-function unicodeFallback(art: MermaidArt | null, width: number, theme: Theme, isStreaming: boolean) {
-	if (!art || art.width > width) return undefined;
-	if (!isStreaming && art.warnings.length > 0) {
-		const suffix = art.warnings.length > 1 ? ` (+${art.warnings.length - 1} more)` : "";
-		const warning = theme.fg("warning", `Mermaid diagram not rendered: ${art.warnings[0]}${suffix}`);
-		return { type: "fallback" as const, warning };
-	}
-	return {
-		type: "rendered" as const,
-		lines: art.styled.map((row) => row.map((span) => styleSpan(span, theme)).join("")),
-	};
-}
 
 function themeSvg(svg: string, theme: Theme): string {
 	const dark = theme.appearance === "dark";
@@ -115,6 +95,81 @@ function themeSvg(svg: string, theme: Theme): string {
 		if (resolved.includes("var(")) throw new Error("Unresolved Pele SVG variable");
 		return resolved;
 	});
+}
+
+function isMermaid(token: Token): token is Token & { type: "code"; text: string; lang?: string } {
+	return token.type === "code" && token.lang?.trim().split(/\s+/, 1)[0]?.toLowerCase() === "mermaid";
+}
+
+function codeSpan(line: string): string {
+	const content = line || "\u00a0";
+	const longestBacktickRun = Math.max(0, ...Array.from(content.matchAll(/`+/g), (match) => match[0].length));
+	const fence = "`".repeat(longestBacktickRun + 1);
+	const padding = content.startsWith("`") || content.endsWith("`") ? " " : "";
+	return `${fence}${padding}${content}${padding}${fence}`;
+}
+
+function themedLines(art: MermaidArt, theme: MermaidTheme): string[] {
+	const foreground = (color: ThemeColor) => theme.getFgAnsi(color).slice(2, -1);
+	const ansiTheme: AnsiTheme = {
+		border: foreground("borderMuted"),
+		text: foreground("text"),
+		edge: foreground("accent"),
+		edgeLabel: foreground("text"),
+		title: `1;${foreground("accent")}`,
+	};
+	const linkLabels = getCapabilities().hyperlinks;
+	const displayArt: MermaidArt = {
+		...art,
+		// Only osc 8 the text, not the whole box.
+		styled: art.styled.map((row) =>
+			row.map((span) => {
+				if (span.href === undefined || (linkLabels && span.role === "text")) return span;
+				const unlinked = { ...span };
+				delete unlinked.href;
+				return unlinked;
+			}),
+		),
+	};
+	return toAnsi(displayArt, ansiTheme);
+}
+
+function unicodeFallback(art: MermaidArt | null, width: number, theme: Theme, isStreaming: boolean) {
+	if (!art || art.width > width) return undefined;
+	if (!isStreaming && art.warnings.length > 0) {
+		const suffix = art.warnings.length > 1 ? ` (+${art.warnings.length - 1} more)` : "";
+		const warning = theme.fg("warning", `Mermaid diagram not rendered: ${art.warnings[0]}${suffix}`);
+		return { type: "fallback" as const, warning };
+	}
+	return { type: "rendered" as const, lines: themedLines(art, theme) };
+}
+
+/** Create a transformer for Unicode Mermaid diagrams in model-written summaries. */
+export function createMermaidMarkdownTransformer(options: MermaidTransformerOptions): MarkdownTransformer {
+	return (markdown, context) => {
+		const mode = options.getMode();
+		// User and assistant messages use the code-block renderer, which can display raster images.
+		if (mode === "off" || context.messageType !== "summary" || (context.isStreaming && mode !== "streaming")) {
+			return markdown;
+		}
+
+		return markdownParser
+			.lexer(markdown)
+			.map((token) => {
+				if (!isMermaid(token)) return token.raw;
+				const art = renderUnicode(token.text);
+				if (!art || art.width > context.availableWidth) return token.raw;
+				if (!context.isStreaming && art.warnings.length > 0) {
+					const suffix = art.warnings.length > 1 ? ` (+${art.warnings.length - 1} more)` : "";
+					const warning = `Mermaid diagram not rendered: ${art.warnings[0]}${suffix}`;
+					const styledWarning = options.theme ? options.theme.fg("warning", warning) : warning;
+					return `${token.raw}\n${codeSpan(styledWarning)}  \n`;
+				}
+				const lines = options.theme ? themedLines(art, options.theme) : art.plain;
+				return `${lines.map(codeSpan).join("  \n")}\n`;
+			})
+			.join("");
+	};
 }
 
 function renderPng(svg: string, width: number, height: number, maxWidthPixels: number): Buffer {

@@ -7,6 +7,7 @@ import {
 	type AuthInteraction,
 	type AuthResult,
 	type ClassifierApi,
+	type ClassifierModel,
 	type Credential,
 	type ImageApi,
 	isModelType,
@@ -83,6 +84,7 @@ export interface ProviderClassifierModelConfig extends ProviderModelConfigBase {
 	type: "classifier";
 	api?: ClassifierApi;
 	contextWindow: number;
+	compat?: ClassifierModel<ClassifierApi>["compat"];
 }
 
 export type ProviderModelConfig = ProviderChatModelConfig | ProviderImageModelConfig | ProviderClassifierModelConfig;
@@ -320,9 +322,12 @@ function applyModelsJson(
 
 	const models: AnyModel[] = baseModels.map((model) => {
 		const baseUrl = config.baseUrl ?? model.baseUrl;
-		return isModelType(model, "chat")
-			? { ...model, baseUrl, compat: mergeCompat(model.compat, config.compat) }
-			: { ...model, baseUrl };
+		if (isModelType(model, "chat")) return { ...model, baseUrl, compat: mergeCompat(model.compat, config.compat) };
+		// Classifier APIs read their own compat fields, such as how a System One service takes images.
+		if (isModelType(model, "classifier") && config.compat) {
+			return { ...model, baseUrl, compat: { ...model.compat, ...config.compat } };
+		}
+		return { ...model, baseUrl };
 	});
 	for (const definition of config.models ?? []) {
 		const existingIndex = models.findIndex((model) => isModelType(model, "chat") && model.id === definition.id);
@@ -582,21 +587,26 @@ export function composeModelProvider(
 		options: StreamOptions | undefined,
 		simple: boolean,
 	): AssistantMessageEventStream =>
-		lazyStream(model, async () => {
-			if (extension?.streamSimple && model.api === extension.api) {
-				return extension.streamSimple(model, context, options as SimpleStreamOptions);
-			}
-			if (base && supportsBaseApi(model)) {
+		lazyStream(
+			model,
+			async () => {
+				if (extension?.streamSimple && model.api === extension.api) {
+					return extension.streamSimple(model, context, options as SimpleStreamOptions);
+				}
+				if (base && supportsBaseApi(model)) {
+					return simple
+						? base.streamSimple(model, context, options as SimpleStreamOptions)
+						: base.stream(model, context, options);
+				}
+				const api = getApiProvider(model.api);
+				if (!api) throw new Error(`No API provider registered for api: ${model.api}`);
 				return simple
-					? base.streamSimple(model, context, options as SimpleStreamOptions)
-					: base.stream(model, context, options);
-			}
-			const api = getApiProvider(model.api);
-			if (!api) throw new Error(`No API provider registered for api: ${model.api}`);
-			return simple
-				? api.streamSimple(model, context, options as SimpleStreamOptions)
-				: api.stream(model, context, options);
-		});
+					? api.streamSimple(model, context, options as SimpleStreamOptions)
+					: api.stream(model, context, options);
+			},
+			undefined,
+			options?.signal,
+		);
 
 	const provider: Provider = {
 		id: providerId,
@@ -606,6 +616,9 @@ export function composeModelProvider(
 		auth: { ...(apiKey ? { apiKey } : {}), ...(oauth ? { oauth } : {}) },
 		getModels: () => getAllModels().filter((model) => isModelType(model, "chat")),
 		getAllModels,
+		// Extension hooks read context.credential, so they need the default credential refresh.
+		refreshModelsAuth:
+			extension?.refreshModels || extension?.oauth?.modifyModels ? undefined : base?.refreshModelsAuth,
 		refreshModels:
 			base?.refreshModels || extension?.refreshModels || extension?.oauth?.modifyModels
 				? async (context) => {

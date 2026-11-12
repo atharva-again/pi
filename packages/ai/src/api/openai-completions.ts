@@ -39,11 +39,16 @@ import { formatProviderError, normalizeProviderError } from "../utils/error-body
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { shortHash } from "../utils/hash.ts";
 import { headersToRecord } from "../utils/headers.ts";
-import { parseStreamingJson, parseToolCallArguments } from "../utils/json-parse.ts";
-import { getPiUserAgent } from "../utils/pi-user-agent.ts";
+import { type ClientIdentity, getIdentityHeaders } from "../utils/identity.ts";
+import {
+	applyOpenRouterReportedCost,
+	isOpenRouterModel,
+	type OpenRouterUsageAccounting,
+} from "../utils/openrouter-cost.ts";
 import { getProviderEnvValue } from "../utils/provider-env.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
+import { ToolCallArgumentsStream } from "../utils/streaming-json.ts";
 import { getSystemMessageText, renderSystemMessageUpdate } from "../utils/text.ts";
 import {
 	getDeclaredTools,
@@ -53,6 +58,7 @@ import {
 } from "../utils/transcript.ts";
 import {
 	appendGrammarToolInputJsonDelta,
+	closeGrammarToolInputJson,
 	createGrammarToolInputProperties,
 	type GrammarToolInputJsonBuffer,
 	getGrammarToolInput,
@@ -171,12 +177,14 @@ type ResolvedOpenAICompletionsCompat = Omit<
 	Required<OpenAICompletionsCompat>,
 	| "cacheControlFormat"
 	| "supportsThinkingTokenBudget"
+	| "promptCacheKeyMode"
 	| "thinkingTokenBudgetField"
 	| "supportsMidConvoSystemMessages"
 	| "supportsMidConvoToolAdditions"
 	| "vllmPriority"
 > & {
 	cacheControlFormat?: OpenAICompletionsCompat["cacheControlFormat"];
+	promptCacheKeyMode?: OpenAICompletionsCompat["promptCacheKeyMode"];
 	supportsThinkingTokenBudget?: OpenAICompletionsCompat["supportsThinkingTokenBudget"];
 	thinkingTokenBudgetField?: OpenAICompletionsCompat["thinkingTokenBudgetField"];
 	supportsMidConvoSystemMessages?: OpenAICompletionsCompat["supportsMidConvoSystemMessages"];
@@ -351,6 +359,7 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 				normalizedContext,
 				apiKey,
 				options?.headers,
+				options?.identity,
 				options?.fetch,
 				cacheSessionId,
 				compat,
@@ -383,15 +392,13 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 			await options?.onResponse?.({ status: response.status, headers: headersToRecord(response.headers) }, model);
 			stream.push({ type: "start", partial: output });
 
-			interface StreamingToolCallBlock extends ToolCall {
-				partialArgs?: string;
-				customInput?: {
-					property: string;
-					jsonBuffer: GrammarToolInputJsonBuffer;
-				};
-				streamIndex?: number;
-			}
-			type StreamingBlock = TextContent | ThinkingContent | StreamingToolCallBlock;
+			// Stream state of a tool call, kept off the content block so it never reaches partials: JSON arguments, or
+			// the input of a grammar (custom) tool.
+			type ToolCallInput =
+				| { readonly kind: "json"; readonly arguments: ToolCallArgumentsStream }
+				| { readonly kind: "custom"; readonly property: string; readonly buffer: GrammarToolInputJsonBuffer };
+			type ToolCallState = { streamIndex: number | undefined; input: ToolCallInput };
+			type StreamingBlock = TextContent | ThinkingContent | ToolCall;
 			type StreamingToolCallDelta = {
 				index?: number;
 				id?: string;
@@ -403,32 +410,16 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 			let textBlock: TextContent | null = null;
 			let thinkingBlock: ThinkingContent | null = null;
 			let hasFinishReason = false;
-			const toolCallBlocksByIndex = new Map<number, StreamingToolCallBlock>();
-			const toolCallBlocksById = new Map<string, StreamingToolCallBlock>();
+			const toolCallBlocksByIndex = new Map<number, ToolCall>();
+			const toolCallBlocksById = new Map<string, ToolCall>();
+			const toolCallStates = new Map<ToolCall, ToolCallState>();
 			const blocks = output.content as StreamingBlock[];
 			const getContentIndex = (block: StreamingBlock) => blocks.indexOf(block);
-			const getCustomToolCallInput = (block: StreamingToolCallBlock): string => {
-				const property = block.customInput?.property;
-				if (property === undefined) return "";
-				const value = block.arguments[property];
-				return typeof value === "string" ? value : "";
-			};
-			const appendCustomToolCallInput = (
-				block: StreamingToolCallBlock,
-				nextInput: string,
-				close: boolean,
-			): string | undefined => {
-				const customInput = block.customInput;
-				if (!customInput) return undefined;
-				const delta = appendGrammarToolInputJsonDelta(
-					customInput.jsonBuffer,
-					customInput.property,
-					nextInput,
-					close,
-				);
-				block.arguments = { [customInput.property]: nextInput };
-				return delta;
-			};
+			const customInput = (property: string): ToolCallInput => ({
+				kind: "custom",
+				property,
+				buffer: { input: "", started: false, closed: false },
+			});
 			const finishBlock = (block: StreamingBlock) => {
 				const contentIndex = getContentIndex(block);
 				if (contentIndex === -1) {
@@ -450,8 +441,10 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 						partial: output,
 					});
 				} else if (block.type === "toolCall") {
-					if (block.customInput) {
-						const delta = appendCustomToolCallInput(block, getCustomToolCallInput(block), true);
+					const input = toolCallStates.get(block)!.input;
+					toolCallStates.delete(block);
+					if (input.kind === "custom") {
+						const delta = closeGrammarToolInputJson(input.buffer, input.property, undefined);
 						if (delta !== undefined) {
 							stream.push({
 								type: "toolcall_delta",
@@ -461,13 +454,8 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 							});
 						}
 					} else {
-						Object.assign(block, parseToolCallArguments(block.partialArgs));
+						Object.assign(block, input.arguments.finish());
 					}
-					// Finalize in-place and strip the scratch buffers so replay only
-					// carries parsed arguments.
-					delete block.partialArgs;
-					delete block.customInput;
-					delete block.streamIndex;
 					stream.push({
 						type: "toolcall_end",
 						contentIndex,
@@ -508,18 +496,19 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 					// a tool we don't knwo about, we at least have a place to stash our stuff.
 					const customInputProperty =
 						toolCall.custom && !toolCall.function ? (grammarToolInputProperties.get(name) ?? "input") : undefined;
-					const hasCustomInput = customInputProperty !== undefined;
 					block = {
 						type: "toolCall",
 						id: toolCall.id || "",
 						name,
-						arguments: hasCustomInput ? { [customInputProperty]: "" } : {},
-						partialArgs: hasCustomInput ? undefined : "",
-						customInput: hasCustomInput
-							? { property: customInputProperty, jsonBuffer: { input: "", started: false, closed: false } }
-							: undefined,
-						streamIndex,
+						arguments: customInputProperty !== undefined ? { [customInputProperty]: "" } : {},
 					};
+					toolCallStates.set(block, {
+						streamIndex,
+						input:
+							customInputProperty !== undefined
+								? customInput(customInputProperty)
+								: { kind: "json", arguments: new ToolCallArgumentsStream() },
+					});
 					if (streamIndex !== undefined) {
 						toolCallBlocksByIndex.set(streamIndex, block);
 					}
@@ -533,8 +522,9 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 						partial: output,
 					});
 				}
-				if (streamIndex !== undefined && block.streamIndex === undefined) {
-					block.streamIndex = streamIndex;
+				const state = toolCallStates.get(block)!;
+				if (streamIndex !== undefined && state.streamIndex === undefined) {
+					state.streamIndex = streamIndex;
 					toolCallBlocksByIndex.set(streamIndex, block);
 				}
 				if (toolCall.id) {
@@ -543,16 +533,12 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 				if (!block.name && name) {
 					block.name = name;
 				}
-				if (toolCall.custom && !toolCall.function && !block.customInput) {
+				if (toolCall.custom && !toolCall.function && state.input.kind !== "custom") {
 					const customInputProperty = grammarToolInputProperties.get(block.name) ?? "input";
 					block.arguments = { [customInputProperty]: "" };
-					block.customInput = {
-						property: customInputProperty,
-						jsonBuffer: { input: "", started: false, closed: false },
-					};
-					delete block.partialArgs;
+					state.input = customInput(customInputProperty);
 				}
-				return block;
+				return { block, state };
 			};
 
 			for await (const chunk of openaiStream) {
@@ -654,7 +640,7 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 
 					if (choice?.delta?.tool_calls) {
 						for (const toolCall of choice.delta.tool_calls as StreamingToolCallDelta[]) {
-							const block = ensureToolCallBlock(toolCall);
+							const { block, state } = ensureToolCallBlock(toolCall);
 							if (!block.id && toolCall.id) {
 								block.id = toolCall.id;
 								toolCallBlocksById.set(toolCall.id, block);
@@ -665,13 +651,14 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 							}
 
 							let delta = "";
-							if (toolCall.function?.arguments) {
+							const input = state.input;
+							if (toolCall.function?.arguments && input.kind === "json") {
 								delta = toolCall.function.arguments;
-								block.partialArgs = (block.partialArgs ?? "") + toolCall.function.arguments;
-								block.arguments = parseStreamingJson(block.partialArgs);
-							} else if (toolCall.custom?.input) {
-								const nextInput = getCustomToolCallInput(block) + toolCall.custom.input;
-								delta = appendCustomToolCallInput(block, nextInput, false) ?? "";
+								block.arguments = input.arguments.append(delta);
+							} else if (toolCall.custom?.input && input.kind === "custom") {
+								delta =
+									appendGrammarToolInputJsonDelta(input.buffer, input.property, toolCall.custom.input) ?? "";
+								block.arguments = { [input.property]: input.buffer.input };
 							}
 							stream.push({
 								type: "toolcall_delta",
@@ -711,11 +698,6 @@ export const stream: StreamFunction<"openai-completions", OpenAICompletionsOptio
 				if (block.type === "thinking") {
 					applyStreamedReasoningDetails(block);
 				}
-				delete (block as { index?: number }).index;
-				// Streaming scratch buffers are only used during parsing; never persist them.
-				delete (block as { partialArgs?: string }).partialArgs;
-				delete (block as { customInput?: unknown }).customInput;
-				delete (block as { streamIndex?: number }).streamIndex;
 			}
 			output.stopReason = options?.signal?.aborted ? "aborted" : "error";
 			output.errorMessage = formatProviderError(normalizeProviderError(error));
@@ -761,11 +743,12 @@ function createClient(
 	context: TranscriptContext,
 	apiKey: string,
 	optionsHeaders?: ProviderHeaders,
+	identity?: ClientIdentity,
 	fetch?: typeof globalThis.fetch,
 	sessionId?: string,
 	compat: ResolvedOpenAICompletionsCompat = getCompat(model),
 ) {
-	const headers: ProviderHeaders = { "User-Agent": getPiUserAgent(), ...model.headers };
+	const headers: ProviderHeaders = { ...getIdentityHeaders(model, identity), ...model.headers };
 	if (model.provider === "github-copilot") {
 		const hasImages = hasCopilotVisionInput(context.messages);
 		const copilotHeaders = buildCopilotDynamicHeaders({
@@ -814,20 +797,27 @@ function buildParams(
 ) {
 	const transcriptTools = resolveTranscriptTools(
 		context.messages,
-		compat.supportsMidConvoSystemMessages === true && compat.supportsMidConvoToolAdditions === true,
+		compat.supportsMidConvoSystemMessages === true && compat.supportsMidConvoToolAdditions === true
+			? "additions"
+			: "none",
 	);
 	const messages = convertMessages(model, context, compat, {
 		grammarToolInputProperties,
 	});
 	const cacheControl = getCompatCacheControl(compat, cacheRetention);
+	const promptCacheKeyMode = compat.promptCacheKeyMode ?? "auto";
+	const supportsPromptCacheKey =
+		promptCacheKeyMode === "enabled" ||
+		(promptCacheKeyMode === "auto" &&
+			(model.baseUrl.includes("api.openai.com") ||
+				(cacheRetention === "long" && compat.supportsLongCacheRetention)));
 
 	const params: OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming = {
 		model: model.id,
 		messages,
 		stream: true,
 		prompt_cache_key:
-			(model.baseUrl.includes("api.openai.com") && cacheRetention !== "none") ||
-			(cacheRetention === "long" && compat.supportsLongCacheRetention)
+			cacheRetention !== "none" && supportsPromptCacheKey
 				? clampOpenAIPromptCacheKey(options?.sessionId)
 				: undefined,
 		prompt_cache_retention: cacheRetention === "long" && compat.supportsLongCacheRetention ? "24h" : undefined,
@@ -859,8 +849,7 @@ function buildParams(
 		if (compat.zaiToolStream) {
 			(params as any).tool_stream = true;
 		}
-	} else if (hasToolHistory(context.messages)) {
-		// Anthropic (via LiteLLM/proxy) requires tools param when conversation has tool_calls/tool_results
+	} else if (compat.requiresToolsWithToolHistory && hasToolHistory(context.messages)) {
 		params.tools = [];
 	}
 
@@ -1230,11 +1219,14 @@ export function convertMessages(
 	const transformedMessages = transformMessages(normalizedContext.messages, model, (id) => normalizeToolCallId(id));
 	const transcriptTools = resolveTranscriptTools(
 		normalizedContext.messages,
-		compat.supportsMidConvoSystemMessages === true && compat.supportsMidConvoToolAdditions === true,
+		compat.supportsMidConvoSystemMessages === true && compat.supportsMidConvoToolAdditions === true
+			? "additions"
+			: "none",
 	);
 	const instructionRole = model.reasoning && compat.supportsDeveloperRole ? "developer" : "system";
 
 	let lastRole: string | null = null;
+	let systemIndex = 0;
 
 	for (let i = 0; i < transformedMessages.length; i++) {
 		const msg = transformedMessages[i];
@@ -1248,7 +1240,8 @@ export function convertMessages(
 		}
 
 		if (msg.role === "system") {
-			const addedTools = i > 0 && transcriptTools.anchorsAdditions ? (msg.toolsAdded ?? []) : [];
+			// transformMessages keeps system messages in order, so their position matches the transcript.
+			const addedTools = systemIndex++ >= transcriptTools.foldedSystemMessages ? (msg.toolsAdded ?? []) : [];
 			if (addedTools.length > 0) {
 				const kimiToolMessage: KimiToolSystemMessageParam = {
 					role: "system",
@@ -1294,7 +1287,7 @@ export function convertMessages(
 			// Some providers don't accept null content, use empty string instead
 			const assistantMsg: ChatCompletionAssistantMessageParamWithReasoning = {
 				role: "assistant",
-				content: compat.requiresAssistantAfterToolResult ? "" : null,
+				content: compat.requiresAssistantAfterToolResult || compat.requiresNonNullAssistantContent ? "" : null,
 			};
 
 			const assistantTextParts = msg.content
@@ -1420,7 +1413,7 @@ export function convertMessages(
 				const hasImages = toolMsg.content.some((c) => c.type === "image");
 
 				// Always send tool result with text (or placeholder if only images)
-				const hasText = textResult.length > 0;
+				const hasText = textResult.trim().length > 0;
 				const toolResultText = hasText ? textResult : hasImages ? "(see attached image)" : "(no tool output)";
 				// Some providers require the 'name' field in tool results
 				const toolResultMsg: ChatCompletionToolMessageParam = {
@@ -1519,6 +1512,8 @@ function convertTools(
 }
 
 function parseChunkUsage(
+	// OpenRouter adds billing fields to streamed usage at runtime,
+	// although the OpenAI SDK does not type those fields.
 	rawUsage: {
 		prompt_tokens?: number;
 		completion_tokens?: number;
@@ -1558,6 +1553,9 @@ function parseChunkUsage(
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
 	calculateCost(model, usage);
+	if (isOpenRouterModel(model)) {
+		applyOpenRouterReportedCost(usage, rawUsage as typeof rawUsage & OpenRouterUsageAccounting);
+	}
 	return usage;
 }
 
@@ -1653,6 +1651,8 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAIComplet
 		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",
 		requiresToolResultName: false,
 		requiresAssistantAfterToolResult: false,
+		requiresNonNullAssistantContent: false,
+		requiresToolsWithToolHistory: false,
 		requiresThinkingAsText: false,
 		requiresReasoningContentOnAssistantMessages: isDeepSeek,
 		thinkingFormat: isDeepSeek
@@ -1709,6 +1709,9 @@ function getCompat(model: Model<"openai-completions">): ResolvedOpenAICompletion
 		requiresToolResultName: model.compat.requiresToolResultName ?? detected.requiresToolResultName,
 		requiresAssistantAfterToolResult:
 			model.compat.requiresAssistantAfterToolResult ?? detected.requiresAssistantAfterToolResult,
+		requiresNonNullAssistantContent:
+			model.compat.requiresNonNullAssistantContent ?? detected.requiresNonNullAssistantContent,
+		requiresToolsWithToolHistory: model.compat.requiresToolsWithToolHistory ?? detected.requiresToolsWithToolHistory,
 		requiresThinkingAsText: model.compat.requiresThinkingAsText ?? detected.requiresThinkingAsText,
 		requiresReasoningContentOnAssistantMessages:
 			model.compat.requiresReasoningContentOnAssistantMessages ??
@@ -1731,6 +1734,7 @@ function getCompat(model: Model<"openai-completions">): ResolvedOpenAICompletion
 		sendSessionAffinityHeaders: model.compat.sendSessionAffinityHeaders ?? detected.sendSessionAffinityHeaders,
 		sessionAffinityFormat: model.compat.sessionAffinityFormat ?? detected.sessionAffinityFormat,
 		supportsLongCacheRetention: model.compat.supportsLongCacheRetention ?? detected.supportsLongCacheRetention,
+		promptCacheKeyMode: model.compat.promptCacheKeyMode,
 		vllmPriority: model.compat.vllmPriority,
 	};
 }

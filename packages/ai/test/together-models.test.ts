@@ -70,7 +70,6 @@ describe("Together models", () => {
 			supportsReasoningEffort: true,
 			thinkingFormat: "together",
 		});
-
 		const minimax = getModel("together", "MiniMaxAI/MiniMax-M3");
 		expect(minimax.thinkingLevelMap).toEqual({ minimal: null, low: null, medium: null });
 		expect(minimax.compat?.thinkingFormat).toBe("together");

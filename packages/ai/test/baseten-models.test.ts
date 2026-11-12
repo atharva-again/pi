@@ -1,7 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { getModel, streamSimple } from "../src/compat.ts";
+import { getModel, getSupportedThinkingLevels, streamSimple } from "../src/compat.ts";
 import { findEnvKeys, getEnvApiKey } from "../src/env-api-keys.ts";
-import { getSupportedThinkingLevels } from "../src/models.ts";
 
 const originalBasetenApiKey = process.env.BASETEN_API_KEY;
 

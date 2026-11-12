@@ -1,6 +1,6 @@
-import type { Context } from "@earendil-works/chord";
+import type { Context } from "@earendil-works/chord/context";
 import { characterEnd } from "@earendil-works/chord/output";
-import { type Static, Type } from "typebox";
+import { lit, num, obj, opt, type Static, str, union } from "@earendil-works/pi-schema";
 import {
 	type BinaryReader,
 	type FileInfo,
@@ -31,13 +31,22 @@ import {
 } from "./image-processor.ts";
 import { resolveReadToolPath } from "./path-utils.ts";
 
-const readSchema = Type.Object({
-	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
-	offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
-	limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
-});
+const readSchema = obj(
+	{
+		path: str({ description: "Path to the file to read (relative or absolute)" }),
+		offset: opt(num({ description: "Line number to start reading from (1-indexed)" })),
+		limit: opt(num({ description: "Maximum number of lines to read" })),
+	},
+	{ open: true },
+);
 
 export type ReadToolInput = Static<typeof readSchema>;
+
+/** Text files return text; image files return an image block. */
+const readStructuredOutputSchema = union([
+	str(),
+	obj({ type: lit("image"), data: str(), mimeType: str() }, { open: true }),
+]);
 
 export type ReadToolDetails = {
 	/** How the shown text was cut; the text itself is the result content. */
@@ -84,7 +93,7 @@ export type ReadToolOptions = {
 
 /**
  * Reads text files and images. Remarks about truncation, continuation, and image processing are diagnostics; the content
- * is only file text, or one image, which programs get as its `ImageContent`.
+ * is only file text, or one image. Programs get the text, or the image's `ImageContent`.
  */
 export function createReadTool(options: ReadToolOptions = {}): ToolRegistration<typeof readSchema, ReadToolDetails> {
 	const formats = options.images === undefined ? "jpg, png, gif, webp" : "jpg, png, gif, webp, bmp";
@@ -92,6 +101,7 @@ export function createReadTool(options: ReadToolOptions = {}): ToolRegistration<
 		name: "read",
 		description: `Read the contents of a file. Supports text files and images (${formats}). Images are sent as attachments. For text files, output is truncated to ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.`,
 		parameters: readSchema,
+		structuredOutputSchema: readStructuredOutputSchema,
 		async execute(args, api, context) {
 			const { path, offset, limit } = args;
 			const env = requireEnv(api);
@@ -187,7 +197,8 @@ async function readImage(
 	const diagnostics: ToolDiagnostic[] = [
 		{ severity: "info", code: "image", message: [`Read image file [${image.mimeType}].`, ...notes].join(" ") },
 	];
-	return { output: [{ type: "image", data: image.data, mimeType: image.mimeType }], diagnostics };
+	const block = { type: "image" as const, data: image.data, mimeType: image.mimeType };
+	return { output: [block], structuredOutput: block, diagnostics };
 }
 
 /** What the conversation's model takes: whether images, and within which limits. */
@@ -306,6 +317,7 @@ async function readText(
 
 	return {
 		output: outputText === "" ? [] : [{ type: "text" as const, text: outputText }],
+		structuredOutput: outputText,
 		...(details === undefined ? {} : { details }),
 		diagnostics,
 	};
