@@ -60,6 +60,14 @@ impl Output {
         }
     }
 
+    /// Wait until this request's queued output has been written, so its result cannot overtake its events.
+    pub fn wait_for_unsent(&self, unsent: &AtomicUsize) {
+        let mut queues = self.queues.lock().unwrap();
+        while unsent.load(Ordering::SeqCst) > 0 && !queues.closed {
+            queues = self.drained.wait(queues).unwrap();
+        }
+    }
+
     pub fn close(&self) {
         let mut queues = self.queues.lock().unwrap();
         queues.closed = true;
@@ -88,7 +96,9 @@ impl Output {
             };
             let failed = frame::write_frame(writer, &frame).is_err();
             if let Some(counter) = unsent {
+                let queues = self.queues.lock().unwrap();
                 counter.fetch_sub(1, Ordering::SeqCst);
+                drop(queues);
             }
             self.drained.notify_all();
             if failed {

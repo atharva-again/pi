@@ -14,7 +14,7 @@ use serde_json::{Map, Value, json};
 use std::collections::HashMap;
 use std::path::Path;
 use std::process::{Child, ExitStatus, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -190,6 +190,7 @@ pub fn run(
     ));
 
     let names = ["stdout", "stderr"];
+    let unsent = Arc::new(AtomicUsize::new(0));
     let mut ended = [false, false];
     let mut status: Option<Result<ExitStatus, String>> = None;
     let mut idle_until: Option<Instant> = None;
@@ -232,7 +233,7 @@ pub fn run(
                         json!({ "kind": "output", "stream": names[stream] }),
                         bytes,
                     ),
-                    None,
+                    Some(unsent.clone()),
                 );
                 if status.is_some() {
                     idle_until = Some(Instant::now() + EXIT_STDIO_GRACE);
@@ -257,6 +258,9 @@ pub fn run(
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
+    }
+    if ended[0] && ended[1] {
+        output.wait_for_unsent(&unsent);
     }
     // Readers and the writer stop within 100 ms, also when a descendant still holds a pipe; removing the program
     // drops its input channel, which ends a writer waiting for input.

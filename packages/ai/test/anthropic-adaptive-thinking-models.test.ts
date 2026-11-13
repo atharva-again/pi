@@ -12,8 +12,14 @@ const EXPECTED_CURRENT_ADAPTIVE_THINKING_MODELS = [
 	"fireworks/accounts/fireworks/models/deepseek-v4p1-flash",
 	"fireworks/accounts/fireworks/models/ember-1",
 	"fireworks/accounts/fireworks/models/qwen3p8-max",
+	"minimax-cn/MiniMax-M3.1-Flash",
+	"minimax/MiniMax-M3.1-Flash",
 	"opencode/claude-opus-4-8",
 	"opencode/claude-opus-5",
+	"openrouter/~anthropic/claude-fable-latest",
+	"openrouter/~anthropic/claude-haiku-latest",
+	"openrouter/~anthropic/claude-opus-latest",
+	"openrouter/~anthropic/claude-sonnet-latest",
 	"vercel-ai-gateway/anthropic/claude-opus-4.8",
 	"vercel-ai-gateway/anthropic/claude-opus-5",
 	"vercel-ai-gateway/anthropic/claude-sonnet-5",
@@ -38,7 +44,11 @@ describe("Anthropic adaptive thinking model metadata", () => {
 					// Regression for #9323: Fireworks uses catalog effort metadata and
 					// verified fallbacks, not a fixed set of adaptive model names.
 					modelId.startsWith("fireworks/") ||
-					/(opus[-.](4[-.][678]|5)|sonnet[-.]4[-.]6|sonnet[-.]5|haiku[-.]5[-.]5|fable[-.]5)/.test(modelId),
+					modelId === "minimax/MiniMax-M3.1-Flash" ||
+					modelId === "minimax-cn/MiniMax-M3.1-Flash" ||
+					/(opus[-.](4[-.][678]|5|latest)|sonnet[-.](4[-.]6|5|latest)|haiku[-.](5[-.]5|latest)|fable[-.](5|latest))/.test(
+						modelId,
+					),
 			),
 		);
 	});

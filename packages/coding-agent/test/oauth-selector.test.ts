@@ -201,7 +201,7 @@ describe("OAuthSelectorComponent", () => {
 		);
 		try {
 			const output = selector.render(120).join("\n");
-			expect(output).not.toContain(theme.fg("accent", "Test OAuth"));
+			expect(output).toContain(theme.fg("accent", "Test OAuth"));
 			expect(output).toContain(theme.fg("text", "OpenRouter"));
 			expect(stripAnsi(output)).toContain("→ Test OAuth");
 
