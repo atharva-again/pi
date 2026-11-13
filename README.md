@@ -2,7 +2,7 @@ Hi :)
 
 This is my fork of Pi. I created it because I thought the features I'm thinking of might be too niche and not make it too the official Pi, and also because those features can't be implemented as an extension, and need a source patch.
 
-> Fork based on upstream Pi v1.3.0
+> Fork based on upstream Pi v1.5.2
 
 ## Features I Have Implemented
 

@@ -7,6 +7,7 @@ import {
 	mkdirSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	rmSync,
 	statSync,
 	writeFileSync,
@@ -32,7 +33,7 @@ function getEnv(): NodeJS.ProcessEnv {
 	}
 }
 
-import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { Readable } from "node:stream";
 import ignore from "ignore";
 import { minimatch } from "minimatch";
@@ -42,22 +43,25 @@ import { spawnProcess, spawnProcessSync } from "../utils/child-process.ts";
 import { type GitSource, parseGitUrl } from "../utils/git.ts";
 import {
 	canonicalizePath,
+	getPathComparisonKey,
 	isLocalPath,
 	markPathIgnoredByCloudSync,
 	normalizePath,
+	pathsEqual,
 	resolvePath,
 } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
 import { isStdoutTakenOver } from "./output-guard.ts";
 import { type PiManifest, readPiManifest } from "./pi-manifest.ts";
 import type { PackageSource, SettingsManager } from "./settings-manager.ts";
-import { BUILTIN_PATH_PREFIX } from "./source-info.ts";
+import { BUILTIN_PATH_PREFIX, getResourcePathKey } from "./source-info.ts";
 
 const NETWORK_TIMEOUT_MS = 10000;
 const UPDATE_CHECK_CONCURRENCY = 4;
 const GIT_UPDATE_CONCURRENCY = 4;
 
-function isOfflineModeEnabled(): boolean {
+/** Whether PI_OFFLINE is set; package installs and updates then skip all network access. */
+export function isOfflineModeEnabled(): boolean {
 	const value = process.env.PI_OFFLINE;
 	if (!value) return false;
 	return value === "1" || value.toLowerCase() === "true" || value.toLowerCase() === "yes";
@@ -76,6 +80,7 @@ export interface PathMetadata {
 	scope: SourceScope;
 	origin: "package" | "top-level";
 	baseDir?: string;
+	changelogPath?: string;
 	packageRoot?: string;
 }
 
@@ -90,12 +95,27 @@ export interface ResolvedPaths {
 	skills: ResolvedResource[];
 	prompts: ResolvedResource[];
 	themes: ResolvedResource[];
+	/** Configured packages that were skipped because installing them failed. */
+	installFailures?: PackageInstallFailure[];
+}
+
+/** A configured package that could not be installed while resolving resources. */
+export interface PackageInstallFailure {
+	source: string;
+	scope: SourceScope;
+	message: string;
 }
 
 export type MissingSourceAction = "install" | "skip" | "error";
 
 export interface ProgressEvent {
-	type: "start" | "progress" | "complete" | "error";
+	/**
+	 * `start` is followed by exactly one `complete` or `error` for the same source.
+	 * `progress` carries an intermediate message or warning.
+	 * `result` reports an outcome outside that pairing, e.g. one changed package
+	 * after update(): `npm:foo 1.2.0 -> 1.3.0`.
+	 */
+	type: "start" | "progress" | "complete" | "error" | "result";
 	action: "install" | "remove" | "update" | "clone" | "pull";
 	source: string;
 	message?: string;
@@ -170,10 +190,23 @@ interface ConfiguredUpdateSource {
 
 interface NpmUpdateTarget extends ConfiguredUpdateSource {
 	parsed: NpmSource;
+	/** Version installed before the update, if any. */
+	installedVersion?: string;
+	/** Newer version reported by the registry, if the lookup succeeded. */
+	targetVersion?: string;
 }
 
 interface GitUpdateTarget extends ConfiguredUpdateSource {
 	parsed: GitSource;
+}
+
+/** A configured package whose installed npm version or git commit changed during update(). */
+interface UpdatedPackage extends ConfiguredUpdateSource {
+	type: "npm" | "git";
+	/** npm version or git commit before the update; undefined if it was not installed. */
+	from?: string;
+	/** npm version or git commit after the update. */
+	to?: string;
 }
 
 interface ResourceAccumulator {
@@ -664,6 +697,37 @@ function collectResourceFiles(dir: string, resourceType: ResourceType): string[]
 	return collectFiles(dir, FILE_PATTERNS[resourceType]);
 }
 
+// A `pi` object counts as an explicit resource manifest only when it lists resources. Packages whose
+// `pi` object holds only metadata (changelogPath, gallery image/video) still use directory auto-discovery.
+function hasManifestResourceFields(manifest: PiManifest): boolean {
+	return RESOURCE_TYPES.some((resourceType) => manifest[resourceType] !== undefined);
+}
+
+function isPathInside(parent: string, child: string): boolean {
+	const relativePath = relative(parent, child);
+	return (
+		relativePath !== "" && relativePath !== ".." && !relativePath.startsWith(`..${sep}`) && !isAbsolute(relativePath)
+	);
+}
+
+function resolvePackageChangelogPath(packageRoot: string, manifest: PiManifest | null): string | undefined {
+	const changelogPath = manifest?.changelogPath ?? "CHANGELOG.md";
+	if (!changelogPath) return undefined;
+
+	const resolvedPath = resolve(packageRoot, changelogPath);
+	if (!existsSync(resolvedPath)) return undefined;
+
+	const canonicalPackageRoot = canonicalizePath(packageRoot);
+	const canonicalChangelogPath = canonicalizePath(resolvedPath);
+	if (!isPathInside(canonicalPackageRoot, canonicalChangelogPath)) return undefined;
+
+	try {
+		return statSync(resolvedPath).isFile() ? resolvedPath : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 function matchesAnyPattern(filePath: string, patterns: string[], baseDir: string): boolean {
 	const rel = toPosixPath(relative(baseDir, filePath));
 	const name = basename(filePath);
@@ -939,7 +1003,7 @@ export class DefaultPackageManager implements PackageManager {
 
 		// Dedupe: project scope wins over global for same package identity
 		const packageSources = this.dedupePackages(allPackages);
-		await this.resolvePackageSources(packageSources, accumulator, onMissing);
+		const installFailures = await this.resolvePackageSources(packageSources, accumulator, onMissing);
 
 		const globalBaseDir = this.agentDir;
 		const projectBaseDir = join(this.cwd, CONFIG_DIR_NAME);
@@ -991,7 +1055,7 @@ export class DefaultPackageManager implements PackageManager {
 			);
 		}
 
-		return this.toResolvedPaths(accumulator);
+		return { ...this.toResolvedPaths(accumulator), installFailures };
 	}
 
 	async resolveExtensionSources(
@@ -1007,8 +1071,8 @@ export class DefaultPackageManager implements PackageManager {
 		const packageSources = sources
 			.filter((source) => !source.startsWith(BUILTIN_PATH_PREFIX))
 			.map((source) => ({ pkg: source as PackageSource, scope }));
-		await this.resolvePackageSources(packageSources, accumulator);
-		return this.toResolvedPaths(accumulator);
+		const installFailures = await this.resolvePackageSources(packageSources, accumulator);
+		return { ...this.toResolvedPaths(accumulator), installFailures };
 	}
 
 	listConfiguredPackages(): ConfiguredPackage[] {
@@ -1146,17 +1210,18 @@ export class DefaultPackageManager implements PackageManager {
 			}
 		}
 
-		const npmCheckTasks = npmCandidates.map((entry) => async () => ({
-			entry,
-			shouldUpdate: await this.shouldUpdateNpmSource(entry.parsed, entry.scope),
-		}));
+		const npmCheckTasks = npmCandidates.map((entry) => async () => {
+			const check = await this.shouldUpdateNpmSource(entry.parsed, entry.scope);
+			return {
+				entry: { ...entry, installedVersion: check.installedVersion, targetVersion: check.targetVersion },
+				shouldUpdate: check.shouldUpdate,
+			};
+		});
 		const npmCheckResults = await this.runWithConcurrency(npmCheckTasks, UPDATE_CHECK_CONCURRENCY);
 		const userNpmUpdates: NpmUpdateTarget[] = [];
 		const projectNpmUpdates: NpmUpdateTarget[] = [];
-		for (const result of npmCheckResults) {
-			if (!result.shouldUpdate) {
-				continue;
-			}
+		const npmUpdates = npmCheckResults.filter((result) => result.shouldUpdate);
+		for (const result of npmUpdates) {
 			if (result.entry.scope === "user") {
 				userNpmUpdates.push(result.entry);
 			} else {
@@ -1171,32 +1236,82 @@ export class DefaultPackageManager implements PackageManager {
 		if (projectNpmUpdates.length > 0) {
 			tasks.push(this.updateNpmBatch(projectNpmUpdates, "project"));
 		}
+		const gitUpdates: UpdatedPackage[] = [];
 		if (gitCandidates.length > 0) {
 			const gitTasks = gitCandidates.map(
 				(entry) => async () =>
 					this.withProgress("update", entry.source, `Updating ${entry.source}...`, async () => {
+						const targetDir = this.getGitInstallPath(entry.parsed, entry.scope);
+						const from = await this.getGitHead(targetDir);
 						await this.updateGit(entry.parsed, entry.scope);
+						const to = await this.getGitHead(targetDir);
+						if (from !== to) {
+							gitUpdates.push({ source: entry.source, type: "git", scope: entry.scope, from, to });
+						}
 					}),
 			);
 			tasks.push(this.runWithConcurrency(gitTasks, GIT_UPDATE_CONCURRENCY).then(() => {}));
 		}
 
 		await Promise.all(tasks);
+
+		const updated: UpdatedPackage[] = [];
+		for (const { entry } of npmUpdates) {
+			const installedPath = this.getManagedNpmInstallPath(entry.parsed, entry.scope);
+			const to = existsSync(installedPath) ? this.getInstalledNpmVersion(installedPath) : undefined;
+			if (to !== entry.installedVersion) {
+				updated.push({ source: entry.source, type: "npm", scope: entry.scope, from: entry.installedVersion, to });
+			}
+		}
+		// Keep git results in configured order, independent of completion order.
+		for (const entry of gitCandidates) {
+			const update = gitUpdates.find((u) => u.source === entry.source && u.scope === entry.scope);
+			if (update) updated.push(update);
+		}
+
+		// Report each changed package, e.g. "npm:foo 1.2.0 -> 1.3.0".
+		for (const pkg of updated) {
+			const format = (value: string | undefined) =>
+				value === undefined ? "(none)" : pkg.type === "git" ? value.slice(0, 7) : value;
+			const scope = pkg.scope === "project" ? " (project)" : "";
+			this.emitProgress({
+				type: "result",
+				action: "update",
+				source: pkg.source,
+				message: `${pkg.source}${scope} ${format(pkg.from)} -> ${format(pkg.to)}`,
+			});
+		}
 	}
 
-	private async shouldUpdateNpmSource(source: NpmSource, scope: InstalledSourceScope): Promise<boolean> {
+	private async getGitHead(targetDir: string): Promise<string | undefined> {
+		if (!existsSync(targetDir)) return undefined;
+		try {
+			const head = await this.runCommandCapture("git", ["rev-parse", "HEAD"], {
+				cwd: targetDir,
+				timeoutMs: NETWORK_TIMEOUT_MS,
+			});
+			return head.trim() || undefined;
+		} catch {
+			return undefined;
+		}
+	}
+
+	private async shouldUpdateNpmSource(
+		source: NpmSource,
+		scope: InstalledSourceScope,
+	): Promise<{ shouldUpdate: boolean; installedVersion?: string; targetVersion?: string }> {
 		const installedPath = this.getManagedNpmInstallPath(source, scope);
 		const installedVersion = existsSync(installedPath) ? this.getInstalledNpmVersion(installedPath) : undefined;
 		if (!installedVersion) {
-			return true;
+			return { shouldUpdate: true };
 		}
 
 		try {
 			const targetVersion = await this.getLatestNpmVersion(source.version ? source.spec : source.name, source.range);
-			return gt(targetVersion, installedVersion);
+			return { shouldUpdate: gt(targetVersion, installedVersion), installedVersion, targetVersion };
 		} catch {
 			// Preserve existing update behavior when version lookup fails.
-			return true;
+			return { shouldUpdate: true, installedVersion };
 		}
 	}
 
@@ -1212,6 +1327,31 @@ export class DefaultPackageManager implements PackageManager {
 		await this.withProgress("update", sourceLabel, message, async () => {
 			await this.installNpmBatch(specs, scope);
 		});
+
+		this.reportUnchangedNpmUpdates(sources, scope);
+	}
+
+	/**
+	 * npm can resolve stale registry metadata shortly after a publish and install the old
+	 * version without an error. Warn when an announced update did not change the installed version.
+	 */
+	private reportUnchangedNpmUpdates(sources: NpmUpdateTarget[], scope: InstalledSourceScope): void {
+		for (const entry of sources) {
+			if (!entry.installedVersion || !entry.targetVersion) {
+				continue;
+			}
+			const installedPath = this.getManagedNpmInstallPath(entry.parsed, scope);
+			const versionAfter = this.getInstalledNpmVersion(installedPath);
+			if (versionAfter !== entry.installedVersion) {
+				continue;
+			}
+			this.emitProgress({
+				type: "progress",
+				action: "update",
+				source: entry.source,
+				message: `${entry.source} is still ${versionAfter} (registry reports ${entry.targetVersion}); npm registry metadata may be stale, try again in a few minutes`,
+			});
+		}
 	}
 
 	private async installNpmBatch(specs: string[], scope: InstalledSourceScope): Promise<void> {
@@ -1289,7 +1429,8 @@ export class DefaultPackageManager implements PackageManager {
 		sources: Array<{ pkg: PackageSource; scope: SourceScope }>,
 		accumulator: ResourceAccumulator,
 		onMissing?: (source: string) => Promise<MissingSourceAction>,
-	): Promise<void> {
+	): Promise<PackageInstallFailure[]> {
+		const installFailures: PackageInstallFailure[] = [];
 		for (const { pkg, scope } of sources) {
 			const sourceStr = typeof pkg === "string" ? pkg : pkg.source;
 			const filter = typeof pkg === "object" ? pkg : undefined;
@@ -1307,21 +1448,46 @@ export class DefaultPackageManager implements PackageManager {
 
 			const installMissing = async (): Promise<boolean> => {
 				if (isOfflineModeEnabled()) return false;
-				if (!onMissing) {
+				if (onMissing) {
+					const action = await onMissing(resolvedSource);
+					if (action === "skip") return false;
+					if (action === "error") throw new Error(`Missing source: ${resolvedSource}`);
+				}
+				// A source that cannot be installed (no network, missing package, failing git prepare step)
+				// must not abort startup. Skip its resources, like offline mode does, and report the failure.
+				try {
 					await this.installParsedSource(parsed, resolvedScope);
 					return true;
+				} catch (error) {
+					installFailures.push({
+						source: resolvedSource,
+						scope: resolvedScope,
+						message: error instanceof Error ? error.message : String(error),
+					});
+					return false;
 				}
-				const action = await onMissing(resolvedSource);
-				if (action === "skip") return false;
-				if (action === "error") throw new Error(`Missing source: ${resolvedSource}`);
-				await this.installParsedSource(parsed, resolvedScope);
-				return true;
 			};
 
 			if (parsed.type === "npm") {
 				let installedPath = this.getNpmInstallPath(parsed, resolvedScope);
 				const needsInstall =
 					!existsSync(installedPath) || !(await this.installedNpmMatchesConfiguredVersion(parsed, installedPath));
+				if (
+					!needsInstall &&
+					resolvedScope === "temporary" &&
+					!parsed.pinned &&
+					(await this.npmHasAvailableUpdate(parsed, installedPath))
+				) {
+					// Temporary (-e) sources have no `pi update` path, so refresh unpinned ones on load like
+					// temporary git sources. Like `pi update`, install `name@latest` for unversioned specs because a bare
+					// `npm install name` keeps the range already saved in the temporary package.json.
+					const spec = parsed.version ? parsed.spec : `${parsed.name}@latest`;
+					try {
+						await this.installNpm({ ...parsed, spec }, resolvedScope, true);
+					} catch {
+						// Keep the cached install if the refresh fails.
+					}
+				}
 				if (needsInstall) {
 					const installed = await installMissing();
 					if (!installed) continue;
@@ -1338,14 +1504,15 @@ export class DefaultPackageManager implements PackageManager {
 				if (!existsSync(installedPath)) {
 					const installed = await installMissing();
 					if (!installed) continue;
-				} else if (resolvedScope === "temporary" && !parsed.pinned && !isOfflineModeEnabled()) {
-					await this.refreshTemporaryGitSource(parsed, resolvedSource);
+				} else if (resolvedScope === "temporary" && !isOfflineModeEnabled()) {
+					await this.refreshTemporaryGitSource(parsed, resolvedSource, installedPath);
 				}
 				metadata.baseDir = installedPath;
 				metadata.packageRoot = installedPath;
 				this.collectPackageResources(installedPath, accumulator, filter, metadata);
 			}
 		}
+		return installFailures;
 	}
 
 	private findAutoloadDeltaBase(
@@ -1418,7 +1585,7 @@ export class DefaultPackageManager implements PackageManager {
 		if (parsed.type === "git") {
 			return `git:${parsed.host}/${parsed.path}`;
 		}
-		return `local:${this.resolvePath(parsed.path)}`;
+		return `local:${getPathComparisonKey(this.resolvePath(parsed.path))}`;
 	}
 
 	private getSourceMatchKeyForSettings(source: string, scope: SourceScope): string {
@@ -1430,7 +1597,7 @@ export class DefaultPackageManager implements PackageManager {
 			return `git:${parsed.host}/${parsed.path}`;
 		}
 		const baseDir = this.getBaseDirForScope(scope);
-		return `local:${this.resolvePathFromBase(parsed.path, baseDir)}`;
+		return `local:${getPathComparisonKey(this.resolvePathFromBase(parsed.path, baseDir))}`;
 	}
 
 	private buildNoMatchingPackageMessage(source: string, configuredPackages: PackageSource[]): string {
@@ -1735,9 +1902,9 @@ export class DefaultPackageManager implements PackageManager {
 		}
 		if (scope) {
 			const baseDir = this.getBaseDirForScope(scope);
-			return `local:${this.resolvePathFromBase(parsed.path, baseDir)}`;
+			return `local:${getPathComparisonKey(this.resolvePathFromBase(parsed.path, baseDir))}`;
 		}
-		return `local:${this.resolvePath(parsed.path)}`;
+		return `local:${getPathComparisonKey(this.resolvePath(parsed.path))}`;
 	}
 
 	/**
@@ -1837,7 +2004,7 @@ export class DefaultPackageManager implements PackageManager {
 					"--config.strict-dep-builds=false",
 				];
 			case "npm":
-				return ["install", "--omit=dev", "--legacy-peer-deps"];
+				return ["install", "--omit=dev", "--legacy-peer-deps", "--no-audit", "--no-fund"];
 			default:
 				return ["install"];
 		}
@@ -1848,7 +2015,9 @@ export class DefaultPackageManager implements PackageManager {
 		return this.runCommandSync(npmCommand.command, [...npmCommand.args, ...args]);
 	}
 
-	private getNpmInstallArgs(specs: string[], installRoot: string): string[] {
+	private getNpmInstallArgs(specs: string[], root: string): string[] {
+		// npm writes broken nested package-lock.json paths when --prefix goes through a symlink.
+		const installRoot = existsSync(root) ? realpathSync(root) : root;
 		const packageManagerName = this.getPackageManagerName();
 		// Extension packages run inside pi and resolve pi APIs through loader aliases/virtual modules.
 		// Disable peer dependency resolution for managed installs (npm's --legacy-peer-deps, and
@@ -1868,7 +2037,8 @@ export class DefaultPackageManager implements PackageManager {
 				"--config.strict-dep-builds=false",
 			];
 		}
-		return ["install", ...specs, "--prefix", installRoot, "--legacy-peer-deps"];
+		// npm audit fix would run without --legacy-peer-deps and install pi peers, so skip audit advice.
+		return ["install", ...specs, "--prefix", installRoot, "--legacy-peer-deps", "--no-audit", "--no-fund"];
 	}
 
 	private async installNpm(source: NpmSource, scope: SourceScope, temporary: boolean): Promise<void> {
@@ -1878,10 +2048,12 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private async uninstallNpm(source: NpmSource, scope: SourceScope): Promise<void> {
-		const installRoot = this.getNpmInstallRoot(scope, false);
-		if (!existsSync(installRoot)) {
+		const root = this.getNpmInstallRoot(scope, false);
+		if (!existsSync(root)) {
 			return;
 		}
+		// npm writes broken nested package-lock.json paths when --prefix goes through a symlink.
+		const installRoot = realpathSync(root);
 		const packageManagerName = this.getPackageManagerName();
 		if (packageManagerName === "bun") {
 			await this.runNpmCommand(["uninstall", source.name, "--cwd", installRoot]);
@@ -1889,7 +2061,7 @@ export class DefaultPackageManager implements PackageManager {
 		}
 		const args = ["uninstall", source.name, "--prefix", installRoot];
 		if (packageManagerName !== "pnpm") {
-			args.push("--legacy-peer-deps");
+			args.push("--legacy-peer-deps", "--no-audit", "--no-fund");
 		}
 		await this.runNpmCommand(args);
 	}
@@ -1979,20 +2151,31 @@ export class DefaultPackageManager implements PackageManager {
 	}
 
 	private async cleanAndInstallGitDependencies(targetDir: string, markerPath: string): Promise<void> {
-		// Clean untracked files (extensions should be pristine). If this fails after
-		// deleting dependencies, repair them so the existing extension still loads.
+		// Clean untracked files (extensions should be pristine). On Windows, files loaded by
+		// another process (e.g. a native module of this extension in another pi session) cannot
+		// be deleted, so git clean fails. Still install dependencies for the new commit, but keep
+		// the marker so the next update retries the clean.
+		let cleaned = true;
 		try {
 			await this.runCommand("git", ["clean", "-fdx"], { cwd: targetDir });
 		} catch (error) {
-			await this.repairMissingGitDependencies(targetDir).catch(() => {});
-			throw error;
+			cleaned = false;
+			const reason = error instanceof Error ? error.message : String(error);
+			this.emitProgress({
+				type: "progress",
+				action: "update",
+				source: targetDir,
+				message: `Could not remove all untracked files in ${targetDir} (${reason}). Files may be in use by another pi session; close it and run the update again.`,
+			});
 		}
 
 		const packageJsonPath = join(targetDir, "package.json");
 		if (existsSync(packageJsonPath)) {
 			await this.runNpmCommand(this.getGitDependencyInstallArgs(), { cwd: targetDir });
 		}
-		rmSync(markerPath, { force: true });
+		if (cleaned) {
+			rmSync(markerPath, { force: true });
+		}
 	}
 
 	private async ensureGitRef(targetDir: string, fetchArgs: string[], ref: string): Promise<void> {
@@ -2023,11 +2206,22 @@ export class DefaultPackageManager implements PackageManager {
 		await this.cleanAndInstallGitDependencies(targetDir, markerPath);
 	}
 
-	private async refreshTemporaryGitSource(source: GitSource, sourceStr: string): Promise<void> {
+	private async refreshTemporaryGitSource(source: GitSource, sourceStr: string, installedPath: string): Promise<void> {
 		if (isOfflineModeEnabled()) {
 			return;
 		}
 		try {
+			// A ref can name a moving branch, so refresh refs too. Skip the network call only when the
+			// ref is a commit hash that is already checked out.
+			if (source.ref && /^[0-9a-f]{7,64}$/i.test(source.ref)) {
+				const head = await this.runCommandCapture("git", ["rev-parse", "HEAD"], {
+					cwd: installedPath,
+					timeoutMs: NETWORK_TIMEOUT_MS,
+				});
+				if (head.trim().toLowerCase().startsWith(source.ref.toLowerCase())) {
+					return;
+				}
+			}
 			await this.withProgress("pull", sourceStr, `Refreshing ${sourceStr}...`, async () => {
 				await this.updateGit(source, "temporary");
 			});
@@ -2223,6 +2417,14 @@ export class DefaultPackageManager implements PackageManager {
 		filter: PackageFilter | undefined,
 		metadata: PathMetadata,
 	): boolean {
+		const manifest = readPiManifest(join(packageRoot, "package.json"));
+		const changelogPath = resolvePackageChangelogPath(packageRoot, manifest);
+		if (changelogPath) {
+			metadata.changelogPath = changelogPath;
+		} else {
+			delete metadata.changelogPath;
+		}
+
 		if (filter) {
 			for (const resourceType of RESOURCE_TYPES) {
 				const patterns = filter[resourceType];
@@ -2238,10 +2440,9 @@ export class DefaultPackageManager implements PackageManager {
 			return true;
 		}
 
-		const manifest = readPiManifest(join(packageRoot, "package.json"));
-		if (manifest) {
+		if (manifest && hasManifestResourceFields(manifest)) {
 			for (const resourceType of RESOURCE_TYPES) {
-				const entries = manifest[resourceType as keyof PiManifest];
+				const entries = manifest[resourceType];
 				this.addManifestEntries(
 					entries,
 					packageRoot,
@@ -2275,7 +2476,7 @@ export class DefaultPackageManager implements PackageManager {
 		metadata: PathMetadata,
 	): void {
 		const manifest = readPiManifest(join(packageRoot, "package.json"));
-		const entries = manifest?.[resourceType as keyof PiManifest];
+		const entries = manifest?.[resourceType];
 		if (entries) {
 			this.addManifestEntries(entries, packageRoot, resourceType, target, metadata);
 			return;
@@ -2344,7 +2545,7 @@ export class DefaultPackageManager implements PackageManager {
 		resourceType: ResourceType,
 	): { allFiles: string[]; enabledByManifest: Set<string> } {
 		const manifest = readPiManifest(join(packageRoot, "package.json"));
-		const entries = manifest?.[resourceType as keyof PiManifest];
+		const entries = manifest?.[resourceType];
 		if (entries && entries.length > 0) {
 			const allFiles = this.collectFilesFromManifestEntries(entries, packageRoot, resourceType);
 			const manifestPatterns = entries.filter(isOverridePattern);
@@ -2464,7 +2665,7 @@ export class DefaultPackageManager implements PackageManager {
 		const userAgentsSkillsDir = join(getHomeDir(), ".agents", "skills");
 		const projectTrusted = this.settingsManager.isProjectTrusted();
 		const projectAgentsSkillDirs = projectTrusted
-			? collectAncestorAgentsSkillDirs(this.cwd).filter((dir) => resolve(dir) !== resolve(userAgentsSkillsDir))
+			? collectAncestorAgentsSkillDirs(this.cwd).filter((dir) => !pathsEqual(dir, userAgentsSkillsDir))
 			: [];
 
 		const addResources = (
@@ -2653,9 +2854,9 @@ export class DefaultPackageManager implements PackageManager {
 
 			const seen = new Set<string>();
 			return resolved.filter((entry) => {
-				const canonicalPath = canonicalizePath(entry.path);
-				if (seen.has(canonicalPath)) return false;
-				seen.add(canonicalPath);
+				const pathKey = getResourcePathKey(entry.path);
+				if (seen.has(pathKey)) return false;
+				seen.add(pathKey);
 				return true;
 			});
 		};

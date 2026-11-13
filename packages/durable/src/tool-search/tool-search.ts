@@ -3,7 +3,7 @@
  * and the matches are loaded with `control.addTools`, so the next request offers them. Loading writes the
  * conversation's `modelTools` (its `add`), so loaded tools stay offered on that branch, also after a compaction.
  */
-import { Type } from "@earendil-works/pi-ai";
+import { num, obj, opt, str } from "@earendil-works/pi-schema";
 import { defineExtension, defineTool } from "../harness/define.ts";
 import type { ToolRegistration } from "../harness/types.ts";
 import { rankDocuments } from "../search.ts";
@@ -14,12 +14,13 @@ export const DEFAULT_TOOL_SEARCH_LIMIT = 8;
 /** Fixed, so it does not change while deferred tools are registered. */
 const TOOL_SEARCH_DESCRIPTION = `# Tool discovery\n\nSearches over deferred tool metadata with BM25 and exposes matching tools for the next model call.\n\nSome tools may not have been provided to you upfront. Use this tool (\`${TOOL_SEARCH_TOOL_NAME}\`) to search for the required tools.`;
 
-const toolSearchSchema = Type.Object({
-	query: Type.String({ description: "Search query for deferred tools." }),
-	limit: Type.Optional(
-		Type.Number({ description: `Maximum number of tools to return. Defaults to ${DEFAULT_TOOL_SEARCH_LIMIT}.` }),
-	),
-});
+const toolSearchSchema = obj(
+	{
+		query: str({ description: "Search query for deferred tools." }),
+		limit: opt(num({ description: `Maximum number of tools to return. Defaults to ${DEFAULT_TOOL_SEARCH_LIMIT}.` })),
+	},
+	{ open: true },
+);
 
 /** `tool_search` result details: the tools it loaded. */
 export type ToolSearchToolDetails = { loaded: string[] };
@@ -28,27 +29,62 @@ function isObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Schema descriptions and property names, recursively. */
-function schemaText(schema: unknown, parts: string[]): void {
+function resolveSchemaRef(ref: string, root: unknown): unknown {
+	if (ref === "#") return root;
+	if (!ref.startsWith("#/")) return undefined;
+	let current = root;
+	for (const encodedPart of ref.slice(2).split("/")) {
+		let part: string;
+		try {
+			part = decodeURIComponent(encodedPart);
+		} catch {
+			return undefined;
+		}
+		part = part.replace(/~1/g, "/").replace(/~0/g, "~");
+		if (Array.isArray(current)) {
+			if (!/^(0|[1-9]\d*)$/.test(part)) return undefined;
+			current = current[Number(part)];
+		} else if (isObject(current) && Object.hasOwn(current, part)) {
+			current = current[part];
+		} else {
+			return undefined;
+		}
+	}
+	return current;
+}
+
+/**
+ * Schema descriptions and property names, recursively, following local `$ref`s into `root`. `seen` holds the
+ * subschemas already reached through a reference, so recursive and shared definitions are read once, and
+ * definitions no property references are not read.
+ */
+function schemaText(schema: unknown, root: unknown, parts: string[], seen: Set<unknown>): void {
 	if (!isObject(schema)) return;
+	if (typeof schema.$ref === "string") {
+		const target = resolveSchemaRef(schema.$ref, root);
+		if (isObject(target) && !seen.has(target)) {
+			seen.add(target);
+			schemaText(target, root, parts, seen);
+		}
+	}
 	if (typeof schema.description === "string") parts.push(schema.description);
 	if (isObject(schema.properties)) {
 		for (const [name, property] of Object.entries(schema.properties)) {
 			parts.push(name);
-			schemaText(property, parts);
+			schemaText(property, root, parts, seen);
 		}
 	}
-	schemaText(schema.items, parts);
+	schemaText(schema.items, root, parts, seen);
 	for (const key of ["anyOf", "oneOf", "allOf"]) {
 		const variants = schema[key];
-		if (Array.isArray(variants)) for (const variant of variants) schemaText(variant, parts);
+		if (Array.isArray(variants)) for (const variant of variants) schemaText(variant, root, parts, seen);
 	}
 }
 
-/** Search text of a tool: its name, the name with `_` as spaces, its description, and its parameters' text. */
+/** Search text of a tool: its description and its parameters' names and descriptions; the ranker reads the name. */
 function searchText(tool: ToolRegistration): string {
-	const parts = [tool.name, tool.name.replaceAll("_", " "), tool.description];
-	schemaText(tool.parameters, parts);
+	const parts = [tool.description];
+	schemaText(tool.parameters, tool.parameters, parts, new Set([tool.parameters]));
 	return parts.filter((part) => part.trim() !== "").join(" ");
 }
 

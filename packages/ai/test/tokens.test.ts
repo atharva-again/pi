@@ -316,6 +316,14 @@ describe("Token Statistics on Abort", () => {
 		});
 	});
 
+	describe.skipIf(!process.env.QWEN_TOKEN_PLAN_CN_API_KEY)("Qwen Token Plan Individual (CN) Provider", () => {
+		const llm = getModel("qwen-token-plan-individual-cn", "qwen3.8-max");
+
+		it("should include token stats when aborted mid-stream", { retry: 3, timeout: 30000 }, async () => {
+			await testTokensOnAbort(llm);
+		});
+	});
+
 	// =========================================================================
 	// OAuth-based providers (credentials from ~/.pi/agent/oauth.json)
 	// =========================================================================
@@ -354,10 +362,10 @@ describe("Token Statistics on Abort", () => {
 
 	describe("OpenAI Codex Provider", () => {
 		it.skipIf(!openaiCodexToken)(
-			"gpt-5.5 - should include token stats when aborted mid-stream",
+			"gpt-6.1-sol - should include token stats when aborted mid-stream",
 			{ retry: 3, timeout: 30000 },
 			async () => {
-				const llm = getModel("openai-codex", "gpt-5.5");
+				const llm = getModel("openai-codex", "gpt-6.1-sol");
 				await testTokensOnAbort(llm, { apiKey: openaiCodexToken });
 			},
 		);

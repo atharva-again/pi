@@ -8,11 +8,15 @@ import {
 	setCapabilities,
 	type Tokens,
 } from "@earendil-works/pi-tui";
-import type * as grokMermaid from "grok-mermaid";
+import type * as lovelyMermaid from "lovely-mermaid";
 import type * as pele from "pele";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { MarkdownTransformContext } from "../src/core/extensions/types.ts";
 import type { MermaidRenderingMode } from "../src/core/settings-manager.ts";
-import { createMermaidMarkdownCodeBlockRendererFactory } from "../src/modes/interactive/components/mermaid.ts";
+import {
+	createMermaidMarkdownCodeBlockRendererFactory,
+	createMermaidMarkdownTransformer,
+} from "../src/modes/interactive/components/mermaid.ts";
 import type { Theme } from "../src/modes/interactive/theme/theme.ts";
 import { loadPhoton } from "../src/utils/photon.ts";
 
@@ -29,11 +33,11 @@ vi.mock("pele", async (importOriginal) => {
 		},
 	};
 });
-vi.mock("grok-mermaid", async (importOriginal) => {
-	const original = await importOriginal<typeof grokMermaid>();
+vi.mock("lovely-mermaid", async (importOriginal) => {
+	const original = await importOriginal<typeof lovelyMermaid>();
 	return {
 		...original,
-		render: (...args: Parameters<typeof grokMermaid.render>) => {
+		render: (...args: Parameters<typeof lovelyMermaid.render>) => {
 			unicodeRender();
 			return original.render(...args);
 		},
@@ -52,6 +56,7 @@ const theme = {
 	},
 	fg: (color: string, text: string) => `<${color}>${text}</${color}>`,
 	bold: (text: string) => `<bold>${text}</bold>`,
+	getFgAnsi: () => "\x1b[39m",
 } as unknown as Theme;
 const defaultImageSettings = { showImages: true, imageWidthCells: 60 };
 
@@ -61,6 +66,26 @@ function renderer(mode: MermaidRenderingMode, isStreaming = false): MarkdownCode
 		getImageSettings: () => defaultImageSettings,
 		theme,
 	})(isStreaming);
+}
+
+interface TransformOptions {
+	maxWidth?: number;
+	isStreaming?: boolean;
+	messageType?: MarkdownTransformContext["messageType"];
+	mode?: MermaidRenderingMode;
+	theme?: Pick<Theme, "fg" | "getFgAnsi">;
+}
+
+function transformMermaid(markdown: string, options: TransformOptions = {}): string {
+	const transformer = createMermaidMarkdownTransformer({
+		getMode: () => options.mode ?? "streaming",
+		theme: options.theme,
+	});
+	return transformer(markdown, {
+		availableWidth: options.maxWidth ?? 100,
+		isStreaming: options.isStreaming ?? false,
+		messageType: options.messageType ?? "summary",
+	});
 }
 
 function mermaidToken(text: string, lang = "mermaid") {
@@ -352,5 +377,33 @@ describe("Mermaid rendering", () => {
 		const result = renderer("streaming", true)(mermaidToken("flowchart LR\n  A[Foo] invalid"), 80);
 
 		expect(result).toEqual({ type: "fallback" });
+	});
+
+	it("renders additional Mermaid diagram types in summaries", () => {
+		const rendered = transformMermaid('```mermaid\npie\n  title Pets\n  "Dogs" : 4\n```');
+
+		expect(rendered).toContain("Pets");
+		expect(rendered).toContain("Dogs");
+		expect(rendered).toContain("████████████████████");
+		expect(rendered).not.toContain("```mermaid");
+	});
+
+	it("leaves interactive messages unchanged for the image-capable code-block renderer", () => {
+		const markdown = "```mermaid\nflowchart LR\n  A --> B\n```";
+
+		expect(transformMermaid(markdown, { messageType: "user" })).toBe(markdown);
+		expect(transformMermaid(markdown, { messageType: "assistant" })).toBe(markdown);
+		expect(transformMermaid(markdown, { messageType: "assistant-thinking" })).toBe(markdown);
+		expect(transformMermaid(markdown, { messageType: "custom" })).toBe(markdown);
+		expect(transformMermaid(markdown, { messageType: "changelog" })).toBe(markdown);
+	});
+
+	it("respects rendering mode and width for summary diagrams", () => {
+		const markdown = "```mermaid\nflowchart LR\n  A --> B\n```";
+
+		expect(transformMermaid(markdown, { mode: "off" })).toBe(markdown);
+		expect(transformMermaid(markdown, { mode: "final", isStreaming: true })).toBe(markdown);
+		expect(transformMermaid(markdown, { maxWidth: 1 })).toBe(markdown);
+		expect(transformMermaid(markdown, { mode: "final" })).not.toContain("```mermaid");
 	});
 });

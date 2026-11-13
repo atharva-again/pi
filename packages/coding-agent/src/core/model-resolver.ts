@@ -18,42 +18,43 @@ import type { ModelRuntime } from "./model-runtime.ts";
 
 /** Default chat model IDs for providers with built-in chat models. */
 export const defaultModelPerProvider: Partial<Record<KnownProvider, string>> = {
-	"amazon-bedrock": "us.anthropic.claude-opus-4-6-v1",
+	"amazon-bedrock": "us.anthropic.claude-opus-5-5",
 	"ant-ling": "Ring-2.6-1T",
-	anthropic: "claude-opus-4-8",
-	openai: "gpt-5.5",
-	azure: "gpt-5.4",
+	anthropic: "claude-opus-5-5",
+	openai: "gpt-6.1-sol",
+	azure: "gpt-6.1-sol",
 	"openai-codex": "gpt-6.1-sol",
-	nvidia: "nvidia/nemotron-3-ultra-550b-a55b",
+	nvidia: "nvidia/nemotron-3.5-super-vl-120b-a12b",
 	deepseek: "deepseek-v4-pro",
-	google: "gemini-3.1-pro-preview",
-	"google-vertex": "gemini-3.1-pro-preview",
-	"github-copilot": "gpt-5.6-sol",
-	openrouter: "moonshotai/kimi-k2.6",
-	"vercel-ai-gateway": "zai/glm-5.1",
+	google: "gemini-4-argon",
+	"google-vertex": "gemini-4-argon",
+	"github-copilot": "gpt-6.1-sol",
+	openrouter: "moonshotai/kimi-k2.7-code",
+	"vercel-ai-gateway": "zai/glm-5.3",
 	xai: "grok-4.7",
 	groq: "openai/gpt-oss-120b",
 	cerebras: "gpt-oss-120b",
 	zai: "glm-5.3",
 	"zai-coding-cn": "glm-5.3",
 	mistral: "devstral-medium-latest",
-	minimax: "MiniMax-M2.7",
-	"minimax-cn": "MiniMax-M2.7",
-	moonshotai: "kimi-k2.6",
-	"moonshotai-cn": "kimi-k2.6",
-	huggingface: "moonshotai/Kimi-K2.6",
+	minimax: "MiniMax-M3",
+	"minimax-cn": "MiniMax-M3",
+	moonshotai: "kimi-k2.7-code",
+	"moonshotai-cn": "kimi-k2.7-code",
+	huggingface: "moonshotai/Kimi-K2.7-Code",
 	fireworks: "accounts/fireworks/models/kimi-k3",
 	together: "moonshotai/Kimi-K3",
-	baseten: "zai-org/GLM-5.2",
-	opencode: "kimi-k2.6",
-	"opencode-go": "kimi-k3",
+	baseten: "zai-org/GLM-5.3",
+	opencode: "kimi-k2.7-code",
+	"opencode-go": "kimi-k3.1-pro",
 	"kimi-coding": "kimi-for-coding",
 	meta: "muse-spark-1.3",
-	"cloudflare-workers-ai": "@cf/moonshotai/kimi-k2.6",
-	"cloudflare-ai-gateway": "workers-ai/@cf/moonshotai/kimi-k2.6",
-	"qwen-token-plan": "qwen3.7-max",
-	"qwen-token-plan-cn": "qwen3.7-max",
+	"cloudflare-workers-ai": "@cf/moonshotai/kimi-k2.7-code",
+	"cloudflare-ai-gateway": "workers-ai/@cf/moonshotai/kimi-k2.7-code",
+	"qwen-token-plan": "qwen3.8-max",
+	"qwen-token-plan-cn": "qwen3.8-max",
 	"qwen-token-plan-individual": "qwen3.8-max",
+	"qwen-token-plan-individual-cn": "qwen3.8-max",
 	xiaomi: "mimo-v2.6-pro",
 	"xiaomi-token-plan-cn": "mimo-v2.6-pro",
 	"xiaomi-token-plan-ams": "mimo-v2.6-pro",
@@ -127,13 +128,18 @@ function splitProviderPrefix(
 	text: string,
 	models: readonly Model<Api>[],
 ): { provider: string; modelText: string } | undefined {
-	const slashIndex = text.indexOf("/");
-	if (slashIndex === -1) return undefined;
-	const prefix = text.substring(0, slashIndex).trim().toLowerCase();
-	const modelText = text.substring(slashIndex + 1).trim();
-	if (!prefix || !modelText) return undefined;
-	const provider = models.find((model) => model.provider.toLowerCase() === prefix)?.provider;
-	return provider ? { provider, modelText } : undefined;
+	// Provider ids may contain "/" themselves (e.g. URL-derived ids), so match known ids, longest first
+	const lowerText = text.toLowerCase();
+	let best: { provider: string; modelText: string } | undefined;
+	for (const { provider } of models) {
+		const prefix = provider.trim().toLowerCase();
+		if (!prefix || (best && best.provider.length >= provider.length)) continue;
+		const slashIndex = lowerText.indexOf("/", prefix.length);
+		if (slashIndex === -1 || lowerText.substring(0, slashIndex).trim() !== prefix) continue;
+		const modelText = text.substring(slashIndex + 1).trim();
+		if (modelText) best = { provider, modelText };
+	}
+	return best;
 }
 
 /**
@@ -221,7 +227,7 @@ function resolveText(
 
 /**
  * `provider/rest` is only a hint: the whole text may also be a model id on another provider, such as
- * gateway id `zai/glm-5` or commandcode id `xiaomi/mimo-v2.5-pro`. The named provider wins when usable,
+ * gateway id `zai/glm-5` or commandcode id `xiaomi/mimo-v2.6-pro`. The named provider wins when usable,
  * since that is what the syntax usually means; otherwise a sole usable raw match wins, since the named
  * provider could not serve the request. An unusable named match is still preferred over unusable raw
  * matches, so `--api-key` can set up the named provider.

@@ -3,9 +3,9 @@
 //! its id.
 
 use crate::errors::Failure;
-use crate::exec::{Control, Groups};
+use crate::exec::{Control, Groups, running};
 #[cfg(unix)]
-use crate::exec::{Message, kill_group};
+use crate::exec::{Message, kill_group, start_waiter};
 #[cfg(unix)]
 use crate::frame::{EVENT, Frame};
 use crate::output::Output;
@@ -55,25 +55,8 @@ fn size(json: &Value, key: &str) -> Result<u16, Failure> {
 
 impl PtyRequest {
     pub fn from_json(json: &Value) -> Result<PtyRequest, Failure> {
-        let argv = match &json["argv"] {
-            Value::Null => None,
-            value => Some(
-                value
-                    .as_array()
-                    .and_then(|items| {
-                        items
-                            .iter()
-                            .map(|item| item.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .filter(|argv: &Vec<String>| !argv.is_empty())
-                    .ok_or_else(|| {
-                        Failure::new("EINVAL", "argv must be a non-empty array of strings")
-                    })?,
-            ),
-        };
         Ok(PtyRequest {
-            argv,
+            argv: crate::exec::argv(json)?,
             cwd: json["cwd"]
                 .as_str()
                 .ok_or_else(|| Failure::new("EINVAL", "pty needs cwd"))?
@@ -87,15 +70,7 @@ impl PtyRequest {
 }
 
 fn find(terminals: &Terminals, json: &Value) -> Result<Arc<Terminal>, Failure> {
-    let target = json["target"]
-        .as_u64()
-        .ok_or_else(|| Failure::new("EINVAL", "missing field target"))?;
-    terminals
-        .lock()
-        .unwrap()
-        .get(&(target as u32))
-        .cloned()
-        .ok_or_else(|| Failure::new("EBADF", "no running terminal with this id"))
+    running(terminals, json, "terminal")
 }
 
 /// Queue input for the terminal; it is written in the order it arrives, without holding up other requests.
@@ -182,7 +157,7 @@ pub fn run(
             format!("Working directory does not exist: {}", request.cwd),
         ));
     }
-    let (master, mut child) =
+    let (master, child) =
         unix::spawn(&request).map_err(|error| Failure::new("spawn_error", error.to_string()))?;
     let master = Arc::new(master);
     let pid = child.id();
@@ -203,12 +178,21 @@ pub fn run(
     ));
 
     let stop = Arc::new(AtomicBool::new(false));
-    let reader = {
+    // A thread that cannot start (a task limit) fails the terminal; the started program is killed and reaped.
+    let abandon = |mut child: std::process::Child, error: std::io::Error| {
+        stop.store(true, Ordering::SeqCst);
+        kill_group(pid);
+        let _ = child.wait();
+        terminals.lock().unwrap().remove(&id);
+        groups.lock().unwrap().remove(&pid);
+        Failure::new("spawn_error", error.to_string())
+    };
+    let started = {
         let master = master.clone();
         let sender = sender.clone();
         let stop = stop.clone();
         let output = output.clone();
-        thread::spawn(move || {
+        thread::Builder::new().spawn(move || {
             unix::read(&master, &stop, |bytes| {
                 let delivered = sender.send(Message::Data(0, bytes.to_vec())).is_ok();
                 // Like a full pipe: a program that writes faster than the link waits.
@@ -218,24 +202,27 @@ pub fn run(
             let _ = sender.send(Message::Eof(0));
         })
     };
-    {
+    let reader = match started {
+        Ok(reader) => reader,
+        Err(error) => return Err(abandon(child, error)),
+    };
+    let started = {
         let master = master.clone();
         let stop = stop.clone();
-        thread::spawn(move || {
+        thread::Builder::new().spawn(move || {
             for bytes in inputs {
                 if !unix::write_all(&master, &bytes, &stop) {
                     return;
                 }
             }
-        });
+        })
+    };
+    if let Err(error) = started {
+        return Err(abandon(child, error));
     }
-    let waiter = sender.clone();
-    thread::spawn(move || {
-        let _ = waiter.send(match child.wait() {
-            Ok(status) => Message::Exit(status),
-            Err(error) => Message::WaitFailed(error.to_string()),
-        });
-    });
+    if let Err((child, error)) = start_waiter(child, None, sender.clone()) {
+        return Err(abandon(child, error));
+    }
     drop(sender);
 
     let mut status = None;

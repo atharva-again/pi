@@ -66,7 +66,7 @@ const PROVIDER_MODEL_PAIRS: ProviderModelPair[] = [
 	{ provider: "openai", model: "gpt-5-mini", label: "openai-responses-gpt-5-mini" },
 	{ provider: "azure", model: "gpt-4o-mini", label: "azure-gpt-4o-mini" },
 	// OpenAI Codex
-	{ provider: "openai-codex", model: "gpt-5.5", label: "openai-codex-gpt-5.5" },
+	{ provider: "openai-codex", model: "gpt-6.1-sol", label: "openai-codex-gpt-6.1-sol" },
 	// GitHub Copilot
 	{ provider: "github-copilot", model: "claude-sonnet-4.5", label: "copilot-claude-sonnet-4.5" },
 	{ provider: "github-copilot", model: "gpt-5.1-codex", label: "copilot-gpt-5.1-codex" },
@@ -151,6 +151,21 @@ const PROVIDER_MODEL_PAIRS: ProviderModelPair[] = [
 		provider: "qwen-token-plan-individual",
 		model: "glm-5.2",
 		label: "qwen-token-plan-individual-glm-5.2",
+	},
+	{
+		provider: "qwen-token-plan-individual-cn",
+		model: "qwen3.8-max",
+		label: "qwen-token-plan-individual-cn-qwen3.8-max",
+	},
+	{
+		provider: "qwen-token-plan-individual-cn",
+		model: "deepseek-v4-flash-0731",
+		label: "qwen-token-plan-individual-cn-deepseek-v4-flash-0731",
+	},
+	{
+		provider: "qwen-token-plan-individual-cn",
+		model: "glm-5.2",
+		label: "qwen-token-plan-individual-cn-glm-5.2",
 	},
 ];
 

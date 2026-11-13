@@ -430,6 +430,21 @@ describe("Tool Results with Images", () => {
 		});
 	});
 
+	describe.skipIf(!process.env.QWEN_TOKEN_PLAN_CN_API_KEY)(
+		"Qwen Token Plan Individual (CN) Provider (qwen3.8-max)",
+		() => {
+			const llm = getModel("qwen-token-plan-individual-cn", "qwen3.8-max");
+
+			it("should handle tool result with only image", { retry: 3, timeout: 30000 }, async () => {
+				await handleToolWithImageResult(llm);
+			});
+
+			it("should handle tool result with text and image", { retry: 3, timeout: 30000 }, async () => {
+				await handleToolWithTextAndImageResult(llm);
+			});
+		},
+	);
+
 	describe.skipIf(!process.env.KIMI_API_KEY)("Kimi For Coding Provider (kimi-for-coding)", () => {
 		const llm = getModel("kimi-coding", "kimi-for-coding");
 
@@ -530,19 +545,19 @@ describe("Tool Results with Images", () => {
 
 	describe("OpenAI Codex Provider", () => {
 		it.skipIf(!openaiCodexToken)(
-			"gpt-5.5 - should handle tool result with only image",
+			"gpt-6.1-sol - should handle tool result with only image",
 			{ retry: 3, timeout: 30000 },
 			async () => {
-				const llm = getModel("openai-codex", "gpt-5.5");
+				const llm = getModel("openai-codex", "gpt-6.1-sol");
 				await handleToolWithImageResult(llm, { apiKey: openaiCodexToken });
 			},
 		);
 
 		it.skipIf(!openaiCodexToken)(
-			"gpt-5.5 - should handle tool result with text and image",
+			"gpt-6.1-sol - should handle tool result with text and image",
 			{ retry: 3, timeout: 30000 },
 			async () => {
-				const llm = getModel("openai-codex", "gpt-5.5");
+				const llm = getModel("openai-codex", "gpt-6.1-sol");
 				await handleToolWithTextAndImageResult(llm, { apiKey: openaiCodexToken });
 			},
 		);

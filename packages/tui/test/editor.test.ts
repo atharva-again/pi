@@ -2132,6 +2132,36 @@ describe("Editor component", () => {
 	});
 
 	describe("Autocomplete", () => {
+		it("moves the autocomplete selection with selection page keys (#7629)", async () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted = "";
+			editor.onSubmit = (text) => {
+				submitted = text;
+			};
+			editor.setAutocompleteProvider({
+				getSuggestions: async () => ({
+					items: Array.from({ length: 12 }, (_, index) => ({
+						value: `/command-${index}`,
+						label: `command-${index}`,
+					})),
+					prefix: "/",
+				}),
+				applyCompletion,
+			});
+
+			assert.strictEqual(editor.capturesViewportInput, false);
+			editor.handleInput("/");
+			await flushAutocomplete();
+			assert.strictEqual(editor.capturesViewportInput, true);
+
+			editor.handleInput("\x1b[6~");
+			editor.handleInput("\x1b[6~");
+			editor.handleInput("\x1b[5~");
+			editor.handleInput("\r");
+
+			assert.strictEqual(submitted, "/command-5");
+		});
+
 		it("triggers and debounces symbol completion after CJK punctuation", async (t) => {
 			t.mock.timers.enable({ apis: ["setTimeout"] });
 			for (const before of [
@@ -4002,6 +4032,27 @@ describe("Editor component", () => {
 			editor.handleInput("\x7f"); // delete marker #1, renumber #3 -> #2 and #2 -> #1
 			editor.handleInput("\r");
 			assert.strictEqual(submitted, pasteC + pasteB);
+		});
+
+		// Regression test for #11923
+		it("renumbers short paste markers without a size suffix", () => {
+			const editor = new Editor(createTestTUI(), defaultEditorTheme);
+			let submitted = "";
+			editor.onSubmit = (t) => {
+				submitted = t;
+			};
+
+			const pasteA = bigPaste("alpha");
+			const pasteB = bigPaste("beta");
+			editor.handleInput(`\x1b[200~${pasteA}\x1b[201~`); // #1 = A
+			editor.handleInput(`\x1b[200~${pasteB}\x1b[201~`); // #2 = B
+			editor.handleInput("\x15"); // Ctrl+U clears the line, registry stays
+			for (const ch of "[paste #1][paste #2]") editor.handleInput(ch);
+			editor.handleInput("\x1b[D"); // left over marker #2
+			editor.handleInput("\x7f"); // delete marker #1, renumber #2 -> #1
+			assert.strictEqual(editor.getText(), "[paste #1]");
+			editor.handleInput("\r");
+			assert.strictEqual(submitted, pasteB);
 		});
 
 		it("undo after setText restores paste markers and registry", () => {

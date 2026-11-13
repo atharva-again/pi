@@ -17,12 +17,16 @@ export class UserMessageComponent extends Container {
 	private outputPad: number;
 	private markdownTransformers: readonly MarkdownTransformer[];
 	private mermaidRendererFactory?: MermaidMarkdownCodeBlockRendererFactory;
+	private messageId?: string;
+	private timestamp?: string;
 
 	constructor(
 		text: string,
 		markdownTheme: MarkdownTheme = getMarkdownTheme(),
 		outputPad = 1,
 		markdownTransformers: readonly MarkdownTransformer[] = [],
+		messageId?: string,
+		timestamp?: string,
 		mermaidRendererFactory?: MermaidMarkdownCodeBlockRendererFactory,
 	) {
 		super();
@@ -31,6 +35,8 @@ export class UserMessageComponent extends Container {
 		this.outputPad = outputPad;
 		this.markdownTransformers = markdownTransformers;
 		this.mermaidRendererFactory = mermaidRendererFactory;
+		this.messageId = messageId;
+		this.timestamp = timestamp;
 		this.rebuild();
 	}
 
@@ -56,7 +62,13 @@ export class UserMessageComponent extends Container {
 				{
 					preserveOrderedListMarkers: true,
 					preserveBackslashEscapes: true,
-					transform: createMarkdownTransform("user", false, this.markdownTransformers),
+					transform: createMarkdownTransform(
+						"user",
+						() => false,
+						this.markdownTransformers,
+						this.messageId,
+						this.timestamp,
+					),
 					renderCodeBlock: this.mermaidRendererFactory?.(false, { paddingX: this.outputPad }),
 				},
 			),

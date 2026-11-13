@@ -171,7 +171,7 @@ describe("builtin providers", () => {
 			["openai", "gpt-5.4"],
 			["openai", "gpt-5.5"],
 			["openai", "gpt-6-astra"],
-			["openai-codex", "gpt-5.5"],
+			["openai-codex", "gpt-5.6-sol"],
 			["anthropic", "claude-opus-5"],
 			["opencode", "gpt-5.4"],
 			["opencode", "gpt-5.6-terra"],
@@ -188,7 +188,7 @@ describe("builtin providers", () => {
 			["openrouter", "openai/gpt-5.6-terra"],
 		] as const;
 		const unsupported = [
-			["fireworks", "accounts/fireworks/models/ember-1"],
+			["fireworks", "accounts/fireworks/models/deepseek-v4p1-flash"],
 			["openai", "gpt-4.1"],
 			["openai", "gpt-5.2"],
 			["anthropic", "claude-sonnet-4-5"],

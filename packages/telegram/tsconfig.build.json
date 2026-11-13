@@ -5,7 +5,7 @@
 		"paths": {
 			"@earendil-works/pi-agent-core": ["../agent/dist/index.d.ts"],
 			"@earendil-works/pi-agent-core/*": ["../agent/dist/*.d.ts"],
-			"@earendil-works/pi-ai": ["../ai/dist/index.d.ts"],
+			"@earendil-works/pi-ai": ["../coding-agent/dist/core/extensions/pi-ai-extension-view.d.ts"],
 			"@earendil-works/pi-ai/*": ["../ai/dist/*.d.ts", "../ai/dist/providers/*.d.ts"],
 			"@earendil-works/pi-coding-agent": ["../coding-agent/dist/index.d.ts"],
 			"@earendil-works/pi-coding-agent/*": ["../coding-agent/dist/*.d.ts"]

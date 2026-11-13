@@ -73,6 +73,8 @@ describe("UserMessageComponent", () => {
 				undefined,
 				1,
 				[],
+				undefined,
+				undefined,
 				factory,
 			);
 			const lines = component.render(40);
@@ -92,5 +94,22 @@ describe("UserMessageComponent", () => {
 		} finally {
 			resetCapabilitiesCache();
 		}
+	});
+
+	test("passes persisted entry identity in transformer context; live leaves it undefined", () => {
+		initTheme("dark");
+		const captured: Array<{ messageId?: string; timestamp?: string }> = [];
+		const capture = (_markdown: string, context: { messageId?: string; timestamp?: string }) => {
+			captured.push({ messageId: context.messageId, timestamp: context.timestamp });
+			return _markdown;
+		};
+
+		new UserMessageComponent("restored", undefined, 1, [capture], "entry-abc", "2025-01-15T10:30:00.000Z").render(80);
+		new UserMessageComponent("live", undefined, 1, [capture]).render(80);
+
+		expect(captured).toEqual([
+			{ messageId: "entry-abc", timestamp: "2025-01-15T10:30:00.000Z" },
+			{ messageId: undefined, timestamp: undefined },
+		]);
 	});
 });

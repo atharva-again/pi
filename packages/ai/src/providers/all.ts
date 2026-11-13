@@ -33,6 +33,7 @@ import { openrouterProvider } from "./openrouter.ts";
 import { qwenTokenPlanProvider } from "./qwen-token-plan.ts";
 import { qwenTokenPlanCnProvider } from "./qwen-token-plan-cn.ts";
 import { qwenTokenPlanIndividualProvider } from "./qwen-token-plan-individual.ts";
+import { qwenTokenPlanIndividualCnProvider } from "./qwen-token-plan-individual-cn.ts";
 import { togetherProvider } from "./together.ts";
 import { typesafeProvider } from "./typesafe.ts";
 import { vercelAIGatewayProvider } from "./vercel-ai-gateway.ts";
@@ -161,6 +162,7 @@ export function builtinProviders(): Provider[] {
 		qwenTokenPlanProvider(),
 		qwenTokenPlanCnProvider(),
 		qwenTokenPlanIndividualProvider(),
+		qwenTokenPlanIndividualCnProvider(),
 		togetherProvider(),
 		typesafeProvider(),
 		vercelAIGatewayProvider(),
