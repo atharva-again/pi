@@ -470,7 +470,7 @@ export class SettingsSelectorComponent extends Container {
 
 		const supportsImages = getCapabilities().images;
 		const followUpKey = keyDisplayText("app.message.followUp");
-		const cycleThinkingKey = keyDisplayText("app.thinking.cycle");
+		const cycleThinkingKey = `${keyDisplayText("app.thinking.cycleBackward")}/${keyDisplayText("app.thinking.cycleForward")}`;
 		let currentWarnings = { ...config.warnings };
 		const currentModelThinkingLevels = { ...config.modelThinkingLevels };
 		const defaultModelByValue = new Map(
@@ -606,7 +606,7 @@ export class SettingsSelectorComponent extends Container {
 			{
 				id: "model-thinking",
 				label: "Default thinking level per model",
-				description: `Override the default thinking level for specific models. ${cycleThinkingKey} cycles in-session.`,
+				description: `Override the default thinking level for specific models. ${cycleThinkingKey} adjusts it in-session.`,
 				currentValue: modelThinkingOverridesSummary(currentModelThinkingLevels),
 				submenu: (_currentValue, done) => {
 					const steps: SteppedSubmenuStep[] = [
