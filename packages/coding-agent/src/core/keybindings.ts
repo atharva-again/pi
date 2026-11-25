@@ -30,9 +30,13 @@ const APP_KEYBINDINGS = {
 		defaultKeys: process.platform === "win32" ? [] : "ctrl+z",
 		description: "Suspend to background",
 	},
-	"app.thinking.cycle": {
-		defaultKeys: "shift+tab",
-		description: "Cycle thinking level",
+	"app.thinking.cycleForward": {
+		defaultKeys: "alt+.",
+		description: "Increase thinking level",
+	},
+	"app.thinking.cycleBackward": {
+		defaultKeys: "alt+,",
+		description: "Decrease thinking level",
 	},
 	"app.thinking.save": {
 		defaultKeys: "ctrl+s",
@@ -238,7 +242,10 @@ const KEYBINDING_NAME_MIGRATIONS = {
 	clear: "app.clear",
 	exit: "app.exit",
 	suspend: "app.suspend",
-	cycleThinkingLevel: "app.thinking.cycle",
+	cycleThinkingLevel: "app.thinking.cycleForward",
+	cycleThinkingLevelForward: "app.thinking.cycleForward",
+	cycleThinkingLevelBackward: "app.thinking.cycleBackward",
+	"app.thinking.cycle": "app.thinking.cycleForward",
 	cycleModelForward: "app.model.cycleForward",
 	cycleModelBackward: "app.model.cycleBackward",
 	selectModel: "app.model.select",

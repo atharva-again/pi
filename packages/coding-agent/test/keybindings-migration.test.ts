@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { ENV_AGENT_DIR } from "../src/config.ts";
-import { KeybindingsManager } from "../src/core/keybindings.ts";
+import { KeybindingsManager, migrateKeybindingsConfig } from "../src/core/keybindings.ts";
 import { runMigrations } from "../src/migrations.ts";
 
 describe("keybindings migration", () => {
@@ -84,5 +84,20 @@ describe("keybindings migration", () => {
 		const effective = keybindings.getEffectiveConfig();
 		expect(effective["tui.select.confirm"]).toBe("enter");
 		expect(effective["app.interrupt"]).toBe("ctrl+x");
+	});
+
+	it("migrates the former thinking cycle action to the forward action", () => {
+		expect(
+			migrateKeybindingsConfig({
+				"app.thinking.cycle": "shift+tab",
+				"app.thinking.cycleForward": "ctrl+shift+.",
+				cycleThinkingLevel: "alt+.",
+			}),
+		).toEqual({
+			config: {
+				"app.thinking.cycleForward": "ctrl+shift+.",
+			},
+			migrated: true,
+		});
 	});
 });

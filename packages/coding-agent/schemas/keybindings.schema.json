@@ -211,9 +211,13 @@
       "$ref": "#/$defs/KeybindingValue",
       "description": "Suspend to background"
     },
-    "app.thinking.cycle": {
+    "app.thinking.cycleForward": {
       "$ref": "#/$defs/KeybindingValue",
-      "description": "Cycle thinking level"
+      "description": "Increase thinking level"
+    },
+    "app.thinking.cycleBackward": {
+      "$ref": "#/$defs/KeybindingValue",
+      "description": "Decrease thinking level"
     },
     "app.thinking.save": {
       "$ref": "#/$defs/KeybindingValue",

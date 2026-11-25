@@ -77,7 +77,13 @@ export class ThinkingSelectorComponent extends Container implements Focusable {
 		this.addChild(new Spacer(1));
 		this.addChild(new Text("Thinking Level", 0, 0));
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(`${keyDisplayText("app.thinking.cycle")} cycles thinking levels in-session`, 0, 0));
+		this.addChild(
+			new Text(
+				`${keyDisplayText("app.thinking.cycleBackward")}/${keyDisplayText("app.thinking.cycleForward")} adjusts thinking levels in-session`,
+				0,
+				0,
+			),
+		);
 		this.addChild(new Spacer(1));
 
 		this.searchInput = new Input();
