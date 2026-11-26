@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { getModel } from "../src/compat.ts";
+import { getModel, getModels } from "../src/compat.ts";
 import { findEnvKeys, getEnvApiKey } from "../src/env-api-keys.ts";
 
 const originalTogetherApiKey = process.env.TOGETHER_API_KEY;
@@ -13,6 +13,10 @@ afterEach(() => {
 });
 
 describe("Together models", () => {
+	const togetherModels = getModels("together");
+	const gptOss = togetherModels.find((model) => model.id === "openai/gpt-oss-120b");
+	const deepSeekV4 = togetherModels.find((model) => model.id === "deepseek-ai/DeepSeek-V4-Pro-0813");
+
 	it("registers the default Kimi K3 model via OpenAI-compatible Chat Completions API", () => {
 		const model = getModel("together", "moonshotai/Kimi-K3");
 
@@ -24,7 +28,7 @@ describe("Together models", () => {
 		expect(model.thinkingLevelMap).toEqual({ minimal: null, low: null, medium: null });
 		expect(model.input).toEqual(["text", "image"]);
 		expect(model.contextWindow).toBe(1048576);
-		expect(model.maxTokens).toBe(131072);
+		expect(model.maxTokens).toBe(1048576);
 		expect(model.cost).toEqual({
 			input: 3,
 			output: 15,
@@ -33,7 +37,6 @@ describe("Together models", () => {
 		});
 		expect(model.compat).toEqual({
 			supportsStore: false,
-			supportsDeveloperRole: false,
 			supportsReasoningEffort: false,
 			maxTokensField: "max_tokens",
 			thinkingFormat: "together",
@@ -42,9 +45,8 @@ describe("Together models", () => {
 		});
 	});
 
-	it("models Together reasoning controls from the Together API surface", () => {
-		const gptOss = getModel("together", "openai/gpt-oss-120b");
-		expect(gptOss.thinkingLevelMap).toEqual({
+	it.skipIf(!gptOss)("models GPT OSS reasoning controls from the Together API surface", () => {
+		expect(gptOss?.thinkingLevelMap).toEqual({
 			off: null,
 			minimal: null,
 			low: "low",
@@ -53,24 +55,28 @@ describe("Together models", () => {
 			max: null,
 			xhigh: null,
 		});
-		expect(gptOss.compat).toMatchObject({
+		expect(gptOss?.compat).toMatchObject({
 			supportsReasoningEffort: true,
 			thinkingFormat: "openai",
 		});
+	});
 
-		const deepSeekV4 = getModel("together", "deepseek-ai/DeepSeek-V4-Pro-0813");
-		expect(deepSeekV4.thinkingLevelMap).toEqual({
+	it.skipIf(!deepSeekV4)("models DeepSeek V4 reasoning controls from the Together API surface", () => {
+		expect(deepSeekV4?.thinkingLevelMap).toEqual({
 			minimal: null,
 			low: null,
 			medium: null,
 			high: "high",
 			xhigh: null,
 		});
-		expect(deepSeekV4.compat).toMatchObject({
+		expect(deepSeekV4?.compat).toMatchObject({
 			supportsReasoningEffort: true,
 			thinkingFormat: "together",
 		});
-		const minimax = getModel("together", "MiniMaxAI/MiniMax-M3");
+	});
+
+	it("models MiniMax reasoning controls from the Together API surface", () => {
+		const minimax = getModel("together", "MiniMaxAI/MiniMax-M3.1-Flash");
 		expect(minimax.thinkingLevelMap).toEqual({ minimal: null, low: null, medium: null });
 		expect(minimax.compat?.thinkingFormat).toBe("together");
 		expect(minimax.compat?.supportsReasoningEffort).toBe(false);

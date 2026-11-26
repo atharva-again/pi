@@ -64,6 +64,31 @@ describe("SettingsSelectorComponent", () => {
 		expect(onWheelScrollLinesChange.mock.calls.flat()).toEqual([10, "auto", 1]);
 	});
 
+	it("toggles individual notices in the notices submenu", () => {
+		const onNoticeChange = vi.fn();
+		const config = {
+			notices: { cacheMisses: true, cacheWarming: true, compactionCosts: true, reasoningDrops: true },
+			warnings: {},
+			defaultModel: "not set",
+			availableDefaultModels: [],
+			modelThinkingLevels: {},
+			availableThemes: [],
+		} as unknown as SettingsConfig;
+		const callbacks = { onNoticeChange, onCancel: () => {} } as unknown as SettingsCallbacks;
+		const list = new SettingsSelectorComponent(config, callbacks).getSettingsList();
+
+		list.selectItem("notices");
+		list.handleInput("\r");
+		const output = stripAnsi(list.render(120).join("\n"));
+		expect(output).toContain("Cache misses");
+		expect(output).toContain("Reasoning drops");
+
+		for (let i = 0; i < 3; i++) list.handleInput("\x1b[B");
+		list.handleInput("\r");
+
+		expect(onNoticeChange.mock.calls).toEqual([["reasoningDrops", false]]);
+	});
+
 	it("keeps the configured fixed theme marked while browsing", () => {
 		const config = {
 			defaultModel: "not set",

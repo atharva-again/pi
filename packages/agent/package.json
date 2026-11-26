@@ -1,6 +1,6 @@
 {
 	"name": "@earendil-works/pi-agent-core",
-	"version": "1.5.2",
+	"version": "1.6.1",
 	"description": "General-purpose agent with transport abstraction, state management, and attachment support",
 	"type": "module",
 	"main": "./dist/index.js",
@@ -25,8 +25,8 @@
 		"coverage:harness": "vitest --run --config vitest.harness.config.ts --coverage"
 	},
 	"dependencies": {
-		"@earendil-works/pi-ai": "1.5.2",
-		"@earendil-works/pi-schema": "1.5.2"
+		"@earendil-works/pi-ai": "1.6.1",
+		"@earendil-works/pi-schema": "1.6.1"
 	},
 	"keywords": [
 		"ai",

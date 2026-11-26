@@ -613,9 +613,9 @@ describe("Generate E2E Tests", () => {
 	});
 
 	describe.skipIf(!hasCloudflareWorkersAICredentials())(
-		"Cloudflare Workers AI Provider (Kimi K2.6 via OpenAI Completions)",
+		"Cloudflare Workers AI Provider (GPT OSS 120B via OpenAI Completions)",
 		() => {
-			const llm = getModel("cloudflare-workers-ai", "@cf/moonshotai/kimi-k2.6");
+			const llm = getModel("cloudflare-workers-ai", "@cf/openai/gpt-oss-120b");
 
 			it("should complete basic text generation", { retry: 3 }, async () => {
 				await basicTextGeneration(llm);
@@ -640,9 +640,9 @@ describe("Generate E2E Tests", () => {
 	);
 
 	describe.skipIf(!hasCloudflareAiGatewayCredentials())(
-		"Cloudflare AI Gateway → Workers AI (Kimi K2.6 via /compat)",
+		"Cloudflare AI Gateway → Workers AI (GPT OSS 120B via /compat)",
 		() => {
-			const llm = getModel("cloudflare-ai-gateway", "workers-ai/@cf/moonshotai/kimi-k2.6");
+			const llm = getModel("cloudflare-ai-gateway", "workers-ai/@cf/openai/gpt-oss-120b");
 
 			it("should complete basic text generation", { retry: 3 }, async () => {
 				await basicTextGeneration(llm);
@@ -970,8 +970,8 @@ describe("Generate E2E Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.MISTRAL_API_KEY)("Mistral Provider (devstral-medium-latest)", () => {
-		const llm = getModel("mistral", "devstral-medium-latest");
+	describe.skipIf(!process.env.MISTRAL_API_KEY)("Mistral Provider (mistral-medium-latest)", () => {
+		const llm = getModel("mistral", "mistral-medium-latest");
 
 		it("should complete basic text generation", { retry: 3 }, async () => {
 			await basicTextGeneration(llm);
@@ -996,8 +996,8 @@ describe("Generate E2E Tests", () => {
 		});
 	});
 
-	describe.skipIf(!process.env.MISTRAL_API_KEY)("Mistral Provider (pixtral-12b with image support)", () => {
-		const llm = getModel("mistral", "pixtral-12b");
+	describe.skipIf(!process.env.MISTRAL_API_KEY)("Mistral Provider (ministral-14b-latest with image support)", () => {
+		const llm = getModel("mistral", "ministral-14b-latest");
 
 		it("should complete basic text generation", { retry: 3 }, async () => {
 			await basicTextGeneration(llm);

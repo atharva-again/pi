@@ -58,16 +58,18 @@ describe("Copilot Claude via Anthropic Messages", () => {
 
 	it("applies Copilot-specific adaptive thinking effort overrides", () => {
 		const opus48 = getModel("github-copilot", "claude-opus-4.8");
+		expect(opus48.api).toBe("anthropic-messages");
+		expect(opus48.contextWindow).toBe(1000000);
 		expect(opus48.thinkingLevelMap).toMatchObject({ minimal: "low", xhigh: "xhigh", max: "max" });
 		expect(getSupportedThinkingLevels(opus48)).toContain("xhigh");
 		expect(getSupportedThinkingLevels(opus48)).toContain("max");
 
-		const opus5 = getModel("github-copilot", "claude-opus-5");
-		expect(opus5.api).toBe("anthropic-messages");
-		expect(opus5.contextWindow).toBe(1000000);
-		expect(opus5.thinkingLevelMap).toMatchObject({ minimal: "low", xhigh: "xhigh", max: "max" });
-		expect(getSupportedThinkingLevels(opus5)).toContain("xhigh");
-		expect(getSupportedThinkingLevels(opus5)).toContain("max");
+		const sonnet5 = getModel("github-copilot", "claude-sonnet-5");
+		expect(sonnet5.api).toBe("anthropic-messages");
+		expect(sonnet5.contextWindow).toBe(1000000);
+		expect(sonnet5.thinkingLevelMap).toMatchObject({ xhigh: "xhigh", max: "max" });
+		expect(getSupportedThinkingLevels(sonnet5)).toContain("xhigh");
+		expect(getSupportedThinkingLevels(sonnet5)).toContain("max");
 
 		const opus55 = getModel("github-copilot", "claude-opus-5.5");
 		expect(opus55.api).toBe("anthropic-messages");
@@ -78,6 +80,12 @@ describe("Copilot Claude via Anthropic Messages", () => {
 		expect(sonnet46.thinkingLevelMap).toMatchObject({ minimal: "low", max: "max" });
 		expect(getSupportedThinkingLevels(sonnet46)).toContain("max");
 		expect(getSupportedThinkingLevels(sonnet46)).not.toContain("xhigh");
+	});
+
+	// Copilot rejects `thinking: {type: "disabled"}` on Sonnet 5.5 (#12429).
+	it("does not offer thinking off on Claude Sonnet 5.5", () => {
+		const sonnet55 = getModel("github-copilot", "claude-sonnet-5.5");
+		expect(getSupportedThinkingLevels(sonnet55)).not.toContain("off");
 	});
 
 	it("uses Bearer auth, Copilot headers, and valid Anthropic Messages payload", async () => {

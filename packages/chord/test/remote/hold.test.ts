@@ -5,7 +5,15 @@ import { broken, ChordError } from "../../src/data/index.ts";
 import type * as Delta from "../../src/delta/index.ts";
 import { decoder } from "../../src/delta/index.ts";
 import { defineState } from "../../src/documents/index.ts";
-import { type Ctx, createHost, defineFacet, type FacetHost, type Host, type Self } from "../../src/host/index.ts";
+import {
+	type Ctx,
+	createHost,
+	defineFacet,
+	type FacetHost,
+	type Host,
+	type RefIn,
+	type Self,
+} from "../../src/host/index.ts";
 import type { ChordHost } from "../../src/host/internal.ts";
 import { ChordObject } from "../../src/host/object.ts";
 import { defineJob } from "../../src/jobs/index.ts";
@@ -1323,6 +1331,76 @@ describe("holds across a reload (slice 7b §6)", () => {
 		expect(states.at(-1)).toBe("live");
 		await server.close(context);
 	});
+
+	it('a reference made during a version-dropping reload\'s drain joins the old live binding: no fresh admission (decision "References share one wire hold", accepted difference 2)', async () => {
+		const gate = Promise.withResolvers<void>();
+		const { server, client } = await linked((h) =>
+			h.serve(Shown, () => ({
+				variant: "v",
+				members: {
+					label: constant("v1"),
+					n: constant(0),
+					bump: async () => {
+						await gate.promise;
+						return 1;
+					},
+				},
+			})),
+		);
+		const a = (await client.get(Shown, {}, context)) as RefIn<typeof Shown, "v">;
+		// A running call keeps the old attempt open: it drains after the reload commits.
+		const running = a.bump(context);
+		await transported();
+		await reloadServer(server, (h) => serveShownV2(h, "v2", false));
+		await transported();
+		expect(a.state.value).toEqual({ kind: "live" });
+		const b = client.hold(Shown, {}, context);
+		expect([b.state.value, b.label.value, server.activity.value.references]).toEqual([{ kind: "live" }, "v1", 1]);
+		// A separate consumer's new hold is admitted against the new code: v1 is no longer accepted.
+		const other = createHost<TestPrincipal>({ onError: () => {} });
+		await other.load([], context);
+		const [near, far] = memoryLinkPair();
+		server.accept(near, { principal: { kind: "owner" }, codec: testCodec() }, context);
+		other.connect(far, { principal: { kind: "server" }, codec: testCodec() }, context);
+		const fresh = other.hold(Shown, {}, context);
+		await transported();
+		expect(fresh.state.value).toMatchObject({ kind: "failed", cause: { error: { code: "contract_mismatch" } } });
+		gate.resolve();
+		expect(await running).toBe(1);
+		await transported();
+		// After the drain both references leave the old binding together.
+		expect([a.state.value, b.state.value]).toMatchObject([
+			{ kind: "failed", cause: { error: { code: "contract_mismatch" } } },
+			{ kind: "failed", cause: { error: { code: "contract_mismatch" } } },
+		]);
+		await other.close(context);
+		await server.close(context);
+	});
+
+	it('two references sharing one hold (decision "References share one wire hold") follow a restart, a dropped version and a removal together', async () => {
+		const { server, client } = await linked((h) => serveShown(h, "v1", true));
+		const a = await client.get(Shown, {}, context);
+		const b = await client.get(Shown, {}, context);
+		await transported();
+		expect(server.activity.value.references).toBe(1);
+		const states = [statesOf(await a.state.watch(context)), statesOf(await b.state.watch(context))];
+		await reloadServer(server, (h) => serveShown(h, "v2", true));
+		await transported();
+		expect([a.label.value, b.label.value]).toEqual(["v2", "v2"]);
+		await reloadServer(server, (h) => serveShownV2(h, "v3", false));
+		await transported();
+		await server.reload([], context);
+		await transported();
+		await reloadServer(server, (h) => serveShown(h, "v4"));
+		await transported();
+		expect([a.label.value, b.label.value]).toEqual(["v4", "v4"]);
+		// Each reference sees what one hold of its own would have: the restart, the dropped version, the removal while
+		// failed (no change), the type served again.
+		const followed = ["loading", "live", "loading", "failed", "loading", "live"];
+		expect(states.map((each) => each.map((state) => state.replace(/:.*/, "")))).toEqual([followed, followed]);
+		expect(server.activity.value.references).toBe(1);
+		await server.close(context);
+	});
 });
 
 describe("holds across more than one reload (fix round 1)", () => {
@@ -1681,9 +1759,10 @@ describe('calls in flight across a `loading` unbind (decision "Calls in flight s
 		await peer.next("hello");
 		hold(peer, 0, Kept);
 		await peer.next("bound");
-		const reload = (next: KeptCode | ReturnType<typeof keptFacet>) =>
-			server.reload([{ name: "@test/app", facet: "n" in next ? keptFacet(next) : next }], context);
-		return { server, peer, reload };
+		const reloadFacet = (next: ReturnType<typeof keptFacet>) =>
+			server.reload([{ name: "@test/app", facet: next }], context);
+		const reload = (next: KeptCode) => reloadFacet(keptFacet(next));
+		return { server, peer, reload, reloadFacet };
 	}
 
 	/** Sends call `call` of `method` (an index of `Kept`'s variant `a`) on hold 0. */
@@ -1824,7 +1903,7 @@ describe('calls in flight across a `loading` unbind (decision "Calls in flight s
 	it("a kept call of a version the new code drops is rejected contract_mismatch with the hold's failed", async () => {
 		const opened = Promise.withResolvers<void>();
 		const ran: string[] = [];
-		const { server, peer, reload } = await keptServer({ n: 1, native: true });
+		const { server, peer, reloadFacet } = await keptServer({ n: 1, native: true });
 		const v2 = defineFacet<TestPrincipal>((h) =>
 			h.serve(KeptV2, (_, _principal, self) => {
 				self.open(
@@ -1841,7 +1920,7 @@ describe('calls in flight across a `loading` unbind (decision "Calls in flight s
 				return { variant: "a", members: { label: constant({ text: "v2" }), bump: ping, ping } };
 			}),
 		);
-		await reload(v2);
+		await reloadFacet(v2);
 		call(peer, 0, "ping");
 		await peer.next("loading");
 		opened.resolve();
@@ -1942,6 +2021,69 @@ describe('calls in flight across a `loading` unbind (decision "Calls in flight s
 		await server.close(context);
 	});
 
+	it("fences each unacknowledged bound: A, B, C before any ack, a call between is decoded by what its consumer had applied (slice 14 §2.4)", async () => {
+		const ran: string[] = [];
+		const { server, peer, reload } = await keptServer({ n: 1, ran }, { ack: false });
+		peer.ack();
+		// A (variant a, acknowledged), then B (variant b) and C (variant a again), neither acknowledged.
+		await reload({ n: 2, variant: "b", ran });
+		expect((await peer.next("bound")).holds[0]!.variant).toBe(1);
+		await reload({ n: 3, variant: "a", ran });
+		expect((await peer.next("bound")).holds[0]!.variant).toBe(0);
+		// Sent before B was applied: index 0 is A's `bump`.
+		peer.send({ kind: "call", call: 0, hold: 0, method: 0 });
+		expect(partValue((await peer.next("result")).value!)).toBe(3);
+		expect(ran).toEqual(["bump"]);
+		// B applied and acknowledged, C not yet: index 0 is B's `ping` (one fence would still decode it by A's names).
+		peer.ack();
+		peer.send({ kind: "call", call: 1, hold: 0, method: 0 });
+		expect(partValue((await peer.next("result")).value!)).toBe(3);
+		expect(ran).toEqual(["bump", "ping"]);
+		// C acknowledged: index 0 is `bump` again.
+		peer.ack();
+		peer.send({ kind: "call", call: 2, hold: 0, method: 0 });
+		expect(partValue((await peer.next("result")).value!)).toBe(3);
+		expect(ran).toEqual(["bump", "ping", "bump"]);
+		expect(peer.closed).toBe(false);
+		await server.close(context);
+	});
+
+	it("drops a fence with the ack of its bound: a consumer that never calls keeps none (GC)", async () => {
+		// The live attempt alone: a sealed one keeps the error it was sealed with.
+		let self: Self<TestPrincipal> | undefined;
+		const server = createHost<TestPrincipal>({ address: Server(), principal: { kind: "server" }, onError: () => {} });
+		const facet = defineFacet<TestPrincipal>((h) =>
+			h.serve(Kept, (_, _principal, declared) => {
+				self = declared;
+				return { variant: "a", members: { label: constant("v1"), bump: async () => 1, ping: async () => 1 } };
+			}),
+		);
+		await server.load([{ name: "@test/app", facet }], context);
+		const objects = instancesOf(ChordObject, "attempt");
+		const [a, b] = memoryLinkPair();
+		server.accept(a, { principal: { kind: "owner" }, codec: testCodec() }, context);
+		// It acknowledges every `bound` and sends no call.
+		const peer = new RawPeer(b);
+		await peer.next("hello");
+		hold(peer, 0, Kept);
+		await peer.next("bound");
+		// Each failure it is told is what the fence of the next `bound` keeps for calls sent before it.
+		const failures: WeakRef<ChordError>[] = [];
+		for (let round = 0; round < 4; round++) {
+			const error = new ChordError({ code: "unavailable", message: `failure ${round}` });
+			failures.push(new WeakRef(error));
+			failLive(objects, self!, error);
+			await peer.next("failed");
+			peer.send({ kind: "retry", hold: 0, hops: 16 });
+			await peer.next("bound");
+			await transported();
+		}
+		// Every `bound` was acknowledged: no fence is left to keep what the consumer was told before it. (The last
+		// failure is still reachable from this test's own frame, fences or not.)
+		await expectCollected(...failures.slice(0, -1));
+		await server.close(context);
+	});
+
 	it("a call crossing a removal's failed gets the removal's cause, never not_ready (audit F3)", async () => {
 		const { server, peer } = await keptServer({ n: 1 });
 		await server.reload([], context);
@@ -1955,7 +2097,7 @@ describe('calls in flight across a `loading` unbind (decision "Calls in flight s
 	});
 
 	it("a call crossing a version refusal's failed gets contract_mismatch, never not_ready (audit F3)", async () => {
-		const { server, peer, reload } = await keptServer({ n: 1 });
+		const { server, peer, reloadFacet } = await keptServer({ n: 1 });
 		// The new code serves version 2 only: the version 1 hold is refused.
 		const answer = async () => 2;
 		const v2 = defineFacet<TestPrincipal>((h) =>
@@ -1964,7 +2106,7 @@ describe('calls in flight across a `loading` unbind (decision "Calls in flight s
 				members: { label: constant({ text: "v2" }), bump: answer, ping: answer },
 			})),
 		);
-		await reload(v2);
+		await reloadFacet(v2);
 		const failed = await peer.next("failed");
 		expect(failed.cause).toMatchObject({ kind: "waiting", error: { error: { code: "contract_mismatch" } } });
 		call(peer, 0, "ping");
