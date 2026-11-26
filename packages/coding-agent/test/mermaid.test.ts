@@ -132,6 +132,27 @@ describe("Mermaid rendering", () => {
 		);
 	});
 
+	it("leaves unsupported diagrams unchanged and explains oversized ones", () => {
+		const unsupported = "```mermaid\ngantt\n  title Plan\n```";
+		const oversized = "```mermaid\nflowchart LR\n  A[Start] --> B[Done]\n```";
+
+		expect(transformMermaid(unsupported)).toBe(unsupported);
+		expect(transformMermaid(oversized, { maxWidth: 10, isStreaming: true })).toBe(oversized);
+		const narrow = transformMermaid(oversized, { maxWidth: 10 });
+		expect(narrow).toContain(oversized);
+		expect(narrow).toContain("```\n`Mermaid diagram not rendered: needs 21 columns, 10 available`");
+	});
+
+	it("reports warnings instead of width when an oversized diagram also has warnings", () => {
+		const invalid = "```mermaid\nflowchart LR\n  A[Start] --> B[Done]\n  C-->\n```";
+
+		const narrow = transformMermaid(invalid, { maxWidth: 10 });
+		expect(narrow).toContain(invalid);
+		expect(narrow).toContain("Mermaid diagram not rendered: dropped, link has no target");
+		expect(narrow).not.toContain("columns");
+		expect(transformMermaid(invalid, { maxWidth: 10, isStreaming: true })).toBe(invalid);
+	});
+
 	it("fills the entire user-message row and insets the diagram within it", async () => {
 		setCapabilities({ images: "kitty", trueColor: true, hyperlinks: true });
 		const factory = createMermaidMarkdownCodeBlockRendererFactory({
@@ -403,7 +424,9 @@ describe("Mermaid rendering", () => {
 
 		expect(transformMermaid(markdown, { mode: "off" })).toBe(markdown);
 		expect(transformMermaid(markdown, { mode: "final", isStreaming: true })).toBe(markdown);
-		expect(transformMermaid(markdown, { maxWidth: 1 })).toBe(markdown);
+		expect(transformMermaid(markdown, { maxWidth: 1 })).toContain(
+			"Mermaid diagram not rendered: needs 14 columns, 1 available",
+		);
 		expect(transformMermaid(markdown, { mode: "final" })).not.toContain("```mermaid");
 	});
 });

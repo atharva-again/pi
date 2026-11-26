@@ -56,8 +56,10 @@ This table covers providers with a single primary API-key variable. Providers th
 | MiniMax | `MINIMAX_API_KEY` |
 | MiniMax (China) | `MINIMAX_CN_API_KEY` |
 | Moonshot AI (Global and China) | `MOONSHOT_API_KEY` |
-| Qwen Token Plan and Individual | `QWEN_TOKEN_PLAN_API_KEY` |
-| Qwen Token Plan (China) and Individual (China) | `QWEN_TOKEN_PLAN_CN_API_KEY` |
+| Qwen Token Plan Team | `QWEN_TOKEN_PLAN_TEAM_API_KEY` |
+| Qwen Token Plan Team (China) | `QWEN_TOKEN_PLAN_TEAM_CN_API_KEY` |
+| Qwen Token Plan Individual | `QWEN_TOKEN_PLAN_INDIVIDUAL_API_KEY` |
+| Qwen Token Plan Individual (China) | `QWEN_TOKEN_PLAN_INDIVIDUAL_CN_API_KEY` |
 | Xiaomi MiMo | `XIAOMI_API_KEY` |
 | Xiaomi MiMo Token Plan (China) | `XIAOMI_TOKEN_PLAN_CN_API_KEY` |
 | Xiaomi MiMo Token Plan (Amsterdam) | `XIAOMI_TOKEN_PLAN_AMS_API_KEY` |
@@ -80,7 +82,7 @@ To use a secret manager without writing the resolved key to disk, set a provider
 }
 ```
 
-Pi runs the command when the key is first needed and caches its standard output for the process lifetime. Empty output, a timeout, or a nonzero exit leaves the key unresolved until Pi restarts.
+Pi runs the command when the key is first needed and caches its standard output for the process lifetime. Empty output, a timeout, or a nonzero exit leaves the key unresolved: `/login` shows the provider as `stored key did not resolve`. To retry, for example after signing in to the secret manager, enter the same `!command` again in `/login`, or restart Pi.
 
 ## Provider Specific Config
 
@@ -104,7 +106,7 @@ A stored API-key credential can include an `env` object. Its values take priorit
 
 Authenticate with `/login openrouter` or `OPENROUTER_API_KEY`.
 
-With a key, Pi lists only the OpenRouter chat models that key may use, with the key's context size, max output, and prices. These come from OpenRouter's `/models/user` endpoint and reflect guardrails and provider restrictions set in OpenRouter. Image and classifier models are not filtered.
+With a key, Pi lists only the OpenRouter chat models that key may use, with the key's context size, max output, and prices. These come from OpenRouter's `/models/user` endpoint and reflect guardrails and provider restrictions set in OpenRouter. Image and decision models are not filtered.
 
 Pi refreshes the list in the background at startup in interactive mode, when `/model` opens, after `/login`, and on `pi update --models`. The last list is saved and used offline and in `pi -p` and RPC mode. After switching keys outside `/login`, the previous key's list stays until the next refresh.
 

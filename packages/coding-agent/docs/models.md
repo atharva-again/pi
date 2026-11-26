@@ -111,6 +111,20 @@ Use `promptCache` to declare the provider's best-effort cache lifetime in second
 
 Choose the conservative end of any published range. A model without a lifetime for the active tier is not eligible for cache warming. A `modelOverrides` entry can set `inputLimits` or `promptCache` for a built-in or extension model, including a model accessed through a validated proxy. See [`cacheWarming`](settings.md#model-and-thinking).
 
+### Map thinking levels
+
+Use `thinkingLevelMap` to choose which thinking levels `/thinking` offers and which provider value Pi sends for each:
+
+```json
+{
+  "id": "reasoning-model",
+  "reasoning": true,
+  "thinkingLevelMap": { "minimal": null, "xhigh": "xhigh", "max": "max" }
+}
+```
+
+A string is sent to the provider as the effort value, and `null` hides the level. Levels left out use the provider's default value for `off` through `high`. `xhigh` and `max` are opt-in: Pi offers them only when the map gives them a string, which must be a value the provider accepts. Set the map in `models.json`, on a custom model or in a `modelOverrides` entry for a built-in model, not in `settings.json`.
+
 ### Configure sampling by thinking level
 
 OpenAI-compatible APIs support free-form `samplingParams` model defaults and `samplingParamsByThinkingLevel` overrides. The latter uses Pi thinking-level keys (`off`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`), not provider values from `thinkingLevelMap`:
@@ -139,9 +153,11 @@ Pi first clamps unsupported thinking levels, then merges model `samplingParams`,
 
 Compatibility settings should describe verified differences in the endpoint's request or response behavior. Do not enable them based only on an endpoint advertising OpenAI or Anthropic compatibility.
 
+<a id="use-classifier-models"></a>
+
 ## Use classifier models
 
-Classifier models do not chat. They answer typed questions about JSON state: pick one of several choices, answer yes or no, or give a score, each with probabilities. Pi includes TypeSafe's Jev model from these providers, Cloudflare's Clef, Clef Flash, and Clef Omni models from Workers AI and OpenRouter, OpenAI's GPT-6 Luna through the [Decisions API](https://developers.openai.com/api/docs/guides/decisions), and Microsoft-Decision-1 through GitHub Copilot:
+Classifier models do not chat. They answer typed questions about JSON state: pick one of several choices, answer yes or no, or give a score, each with probabilities. Pi includes TypeSafe's Jev model from these providers, Cloudflare's Clef, Clef Flash, and Clef Omni models from Workers AI and OpenRouter, OpenAI's GPT-6 Luna through the [Decisions API](https://developers.openai.com/api/docs/guides/decisions), and GPT-6 Luna Decisions and Microsoft-Decision-1 through GitHub Copilot:
 
 | Provider | Model IDs | Authentication |
 |---|---|---|
@@ -151,18 +167,19 @@ Classifier models do not chat. They answer typed questions about JSON state: pic
 | `vercel-ai-gateway` | `typesafe-ai/jev` | `AI_GATEWAY_API_KEY` |
 | `opencode` | `jev-1.13`, `jev-1.13-free` | `OPENCODE_API_KEY` |
 | `openai` | `gpt-6-luna` | `OPENAI_API_KEY` |
-| `github-copilot` | `microsoft-decision-1` | `COPILOT_GITHUB_TOKEN` or `/login` |
+| `github-copilot` | `gpt-6-luna-decisions`, `microsoft-decision-1` | `COPILOT_GITHUB_TOKEN` or `/login` |
 
-Chat models on a [llama.cpp router](llama-cpp.md#classification) are also listed as classifier models.
+Chat models on a [llama.cpp router](llama-cpp.md#classification) are also listed under the `classifier` model type.
 
 OpenAI's Decisions API needs an API key. Sign in with ChatGPT credentials do not work with it, so `gpt-6-luna` is not listed as available while `openai` is logged in through `/login`, even when `OPENAI_API_KEY` is set; log out of `openai` to use the key. GPT-6 Luna also judges images passed in `images`; other classifier models return an error for them. The API rejects inputs above 922K tokens, but requests that run longer than about five seconds, currently above roughly 600K input tokens, fail with a gateway timeout.
 Classifier models whose `input` includes `"image"` also judge images passed in `images`; other classifier models return an error for them. Image input works with GPT-6 Luna, with Jev from `typesafe` and `cloudflare-workers-ai`, with Clef from `cloudflare-workers-ai`, and with the OpenRouter models whose catalog lists image input. Jev takes PNG and JPEG images, and image input is experimental on TypeSafe's own API. Clef takes PNG, JPEG, and WebP images, at most four per request. Jev from `vercel-ai-gateway` and `opencode` takes text only.
+Which GitHub Copilot decision models an account can use depends on its plan: Microsoft-Decision-1 is limited to Business and Enterprise, and organizations can turn models off. With `/login`, pi lists only the decision models in the account's Copilot model catalog. With `COPILOT_GITHUB_TOKEN` it lists both.
 
-Each System One service takes images in its own request format, set by the model's `compat.imageInput`. Built-in models set it, so overriding a provider's `baseUrl` keeps it. A custom provider that proxies another service's classifiers sets it in its provider-level `compat` in `models.json` (see [System One compatibility](models-configuration.md#typesafe-system-one)). OpenRouter in particular answers requests in TypeSafe's format without an error but drops the images.
+Each System One service takes images in its own request format, set by the model's `compat.imageInput`. Built-in models set it, so overriding a provider's `baseUrl` keeps it. A custom provider that proxies another service's classifier models sets it in its provider-level `compat` in `models.json` (see [System One compatibility](models-configuration.md#typesafe-system-one)). OpenRouter in particular answers requests in TypeSafe's format without an error but drops the images.
 
 When the service reports token counts, `result.usage` carries them with their cost. Models without catalog pricing, such as TypeSafe's direct `jev-latest`, report tokens at no cost.
 
-Classifier models do not appear in `/model`. Extensions can find them with `ctx.modelRegistry.findOfType()` and call them through `ctx.modelRegistry.classify()`. [Virtual models](virtual-models.md#route-requests) can use classifiers to route requests; see the `jev-router.ts` example. When the service reports token counts, `result.usage` carries them and their cost. Models without catalog pricing, such as TypeSafe's direct `jev-latest`, report tokens at no cost.
+Classifier models do not appear in `/model`. Extensions can find them with `ctx.modelRegistry.findOfType()` and call them through `ctx.modelRegistry.classify()`. [Virtual models](virtual-models.md#route-requests) can use classifiers to route requests; see the `jev-router.ts` example.
 
 ## Use image models
 

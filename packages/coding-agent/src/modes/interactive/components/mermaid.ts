@@ -135,10 +135,18 @@ function themedLines(art: MermaidArt, theme: MermaidTheme): string[] {
 }
 
 function unicodeFallback(art: MermaidArt | null, width: number, theme: Theme, isStreaming: boolean) {
-	if (!art || art.width > width) return undefined;
+	if (!art) return undefined;
 	if (!isStreaming && art.warnings.length > 0) {
 		const suffix = art.warnings.length > 1 ? ` (+${art.warnings.length - 1} more)` : "";
 		const warning = theme.fg("warning", `Mermaid diagram not rendered: ${art.warnings[0]}${suffix}`);
+		return { type: "fallback" as const, warning };
+	}
+	if (art.width > width) {
+		if (isStreaming) return undefined;
+		const warning = theme.fg(
+			"warning",
+			`Mermaid diagram not rendered: needs ${art.width} columns, ${width} available`,
+		);
 		return { type: "fallback" as const, warning };
 	}
 	return { type: "rendered" as const, lines: themedLines(art, theme) };
@@ -158,12 +166,23 @@ export function createMermaidMarkdownTransformer(options: MermaidTransformerOpti
 			.map((token) => {
 				if (!isMermaid(token)) return token.raw;
 				const art = renderUnicode(token.text);
-				if (!art || art.width > context.availableWidth) return token.raw;
-				if (!context.isStreaming && art.warnings.length > 0) {
-					const suffix = art.warnings.length > 1 ? ` (+${art.warnings.length - 1} more)` : "";
-					const warning = `Mermaid diagram not rendered: ${art.warnings[0]}${suffix}`;
+				if (!art) return token.raw;
+				const withWarning = (warning: string) => {
 					const styledWarning = options.theme ? options.theme.fg("warning", warning) : warning;
 					return `${token.raw}\n${codeSpan(styledWarning)}  \n`;
+				};
+				// Warnings come first: a diagram with warnings stays unrendered at any width.
+				// While streaming, warnings come from unfinished source, so the partial diagram renders.
+				if (!context.isStreaming && art.warnings.length > 0) {
+					const suffix = art.warnings.length > 1 ? ` (+${art.warnings.length - 1} more)` : "";
+					return withWarning(`Mermaid diagram not rendered: ${art.warnings[0]}${suffix}`);
+				}
+				if (art.width > context.availableWidth) {
+					return context.isStreaming
+						? token.raw
+						: withWarning(
+								`Mermaid diagram not rendered: needs ${art.width} columns, ${context.availableWidth} available`,
+							);
 				}
 				const lines = options.theme ? themedLines(art, options.theme) : art.plain;
 				return `${lines.map(codeSpan).join("  \n")}\n`;
@@ -303,7 +322,7 @@ export function createMermaidMarkdownCodeBlockRendererFactory(
 			);
 			return {
 				type: "rendered",
-				lines: image.render(panelWidthCells === undefined ? availableWidth : panelWidthCells + 2),
+				lines: [...image.render(panelWidthCells === undefined ? availableWidth : panelWidthCells + 2)],
 			};
 		} catch (error) {
 			if (isStreaming) {

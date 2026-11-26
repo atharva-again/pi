@@ -250,7 +250,7 @@ describe("generated configuration schemas", () => {
 			path,
 			JSON.stringify({
 				$schema: schemaUrl("models"),
-				providers: { demo: { baseUrl: "http://localhost:8080/v1", models: [{ id: "demo" }] } },
+				providers: { demo: { baseUrl: "http://localhost:9931/v1", models: [{ id: "demo" }] } },
 			}),
 		);
 
